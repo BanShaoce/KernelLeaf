@@ -135,6 +135,19 @@ and steering/throttle Grad-CAM using KernelLeaf autograd. Run
 `python -m apps.autodrive --help` for the unified entry point and see the app
 README for the complete workflow. No real-track result is claimed.
 
+V9 adds a minimal batch-first, pre-norm Transformer Encoder with boolean key
+padding masks, dropout, recursive parameter/state handling, and optional
+sinusoidal positions. It reuses V4 Linear, Softmax, and LayerNorm auto
+dispatch rather than adding duplicate kernels:
+
+```bash
+python -m examples.transformer_encoder_demo --device cpu
+python -m examples.transformer_encoder_demo --device cuda
+```
+
+See `docs/transformer.md` for mask semantics, the API, tests, and intentionally
+unsupported large-language-model features.
+
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.
 

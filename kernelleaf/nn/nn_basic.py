@@ -429,7 +429,9 @@ class RMSNorm(Module):
 class Dropout(Module):
     def __init__(self, p: float = 0.5) -> None:
         super().__init__()
-        self.p = p
+        if not 0 <= p < 1:
+            raise ValueError("dropout probability must be in [0, 1)")
+        self.p = float(p)
 
     def forward(self, x: Tensor) -> Tensor:
         if self.training:
