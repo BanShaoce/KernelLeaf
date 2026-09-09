@@ -12,6 +12,121 @@
 
 ## 1. 环境安装
 
+下面给出 Conda、CPU、CUDA、Triton、Dashboard 和环境污染排查所需的完整步骤。
+这些版本来自本机 `donkey-env2` 的实际测试环境。
+
+### 1.1 创建并进入环境
+
+```powershell
+conda create -n donkey-env2 python=3.9.24 pip=25.2 -y
+conda activate donkey-env2
+cd C:\code\Mytorch
+```
+
+已经存在该环境时不要重复创建，直接执行后两行。随后确认 Python 路径：
+
+```powershell
+where.exe python
+python --version
+```
+
+第一条 Python 路径应指向 `donkey-env2`，版本应为 `3.9.24`。
+
+### 1.2 安装 KernelLeaf 和 AutoDrive
+
+```powershell
+python -m pip install "setuptools==80.9.0" "wheel==0.45.1"
+python -m pip install `
+  "numpy==1.26.4" `
+  "Pillow==11.1.0" `
+  "pygame==2.6.1" `
+  "gym==0.22.0" `
+  "gym-donkeycar==1.3.1" `
+  "pytest==8.4.2" `
+  "pytest-cov==7.1.0"
+python -m pip install -e . --no-deps
+```
+
+各包用途如下：
+
+| 包 | 版本 | 用途 |
+|---|---:|---|
+| NumPy | `1.26.4` | KernelLeaf CPU 后端 |
+| Pillow | `11.1.0` | 图片读取、预处理和增强 |
+| pygame | `2.6.1` | 采集程序的键盘窗口 |
+| gym | `0.22.0` | 模拟器环境接口 |
+| gym-donkeycar | `1.3.1` | 注册 DonkeyCar 环境 |
+| pytest | `8.4.2` | 项目测试 |
+
+### 1.3 安装训练 Dashboard
+
+前端需要 Node.js，本机验证版本为 `24.14.1`：
+
+```powershell
+winget install --id OpenJS.NodeJS.LTS
+```
+
+安装后重新打开 PowerShell，再安装后端和前端依赖：
+
+```powershell
+python -m pip install `
+  "fastapi==0.128.8" `
+  "starlette==0.49.3" `
+  "pydantic==2.13.4" `
+  "uvicorn==0.39.0" `
+  "websockets==15.0.1" `
+  "psutil==7.1.3" `
+  "httpx==0.28.1"
+
+cd apps\autodrive\dashboard
+npm ci
+npm run build
+cd ..\..\..
+```
+
+前端已验证 Node.js `24.14.1` 和 npm `11.11.0`。构建完成后启动后端：
+
+```powershell
+python -m apps.autodrive dashboard --runs-root runs
+```
+
+打开 `http://127.0.0.1:8000`，即可从页面配置并启动 KernelLeaf 训练。
+
+### 1.4 安装 CUDA 和 Triton
+
+没有 NVIDIA GPU 时跳过本节，训练命令使用 `--device cpu`。
+
+```powershell
+python -m pip install `
+  "cupy-cuda12x==13.6.0" `
+  "nvidia-cuda-runtime-cu12==12.6.77" `
+  "nvidia-cuda-nvrtc-cu12==12.6.85" `
+  "triton-windows==3.2.0.post21"
+```
+
+验证 CPU 和 CUDA 使用相同模型并且 loss 都能下降：
+
+```powershell
+nvidia-smi
+python -m examples.device_smoke
+python -m pytest tests/test_device.py tests/test_fused_ops.py -q
+```
+
+本机即使出现 `CUDA path could not be detected` 警告，CUDA smoke 仍然通过，因此应以
+`cupy.cuda.is_available()` 和实际算子测试为准，不能只根据这条警告判断 CUDA 未启用。
+
+### 1.5 安装后检查
+
+```powershell
+python -m apps.autodrive --help
+python -m pytest tests/test_autodrive_v7.py tests/test_autodrive_v8.py tests/test_autodrive_v11.py -q
+python -m pip show numpy cupy-cuda12x triton-windows fastapi
+```
+
+`pip show` 的 `Location` 最好位于 `donkey-env2\Lib\site-packages`。如果显示
+`AppData\Roaming\Python`，说明当前环境正在借用用户级包，换环境后可能出现版本漂移。
+KernelLeaf 不依赖 Paddle、PyTorch 或 OpenCV；不要为了运行本应用额外安装它们。
+
 ## 2. 支持的地图
 
 | 地图参数 | DonkeyCar 环境 |
@@ -166,13 +281,14 @@ python -m apps.autodrive manifest `
   --group-size 500
 ```
 
-不指定 `--maps` 时会转换所有检测到的地图。只转换部分地图：
+不指定 `--map` 时会把所有检测到的地图写入同一个数据索引；这不代表训练时会混用地图。
+只为一个地图转换索引：
 
 ```powershell
 python -m apps.autodrive manifest `
   --data-root data/DonkeyCar `
   --output data/DonkeyCar/mountain_manifest.jsonl `
-  --maps mountain-track
+  --map mountain-track
 ```
 
 旧目录已经丢失真实采集 run 边界，因此转换器使用连续帧号块作为伪 run。
@@ -185,7 +301,7 @@ python -m apps.autodrive manifest `
 ```powershell
 python -m apps.autodrive train `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
-  --maps warren-track `
+  --map warren-track `
   --device cuda `
   --epochs 10 `
   --batch-size 32 `
@@ -203,34 +319,16 @@ NPZ 保存模型参数、BatchNorm 状态、Adam 状态、epoch 和训练配置�
 推理需要的模型结构、归一化、控制范围和对应 NPZ 路径。
 
 
-省略 `--maps` 表示使用 manifest 中的所有地图。也可以手动指定输出名称：
+`--map` 是必填参数，每次训练只能指定一个地图；即使 manifest 收录了多个地图，
+其他地图的数据也不会进入本次训练。也可以手动指定输出名称：
 
 ```powershell
 python -m apps.autodrive train `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
-  --maps warren-track `
+  --map warren-track `
   --device cuda `
   --checkpoint checkpoints/my_warren_model.npz
 ```
-
-### CPU 训练
-
-```powershell
-python -m apps.autodrive train `
-  --manifest data/DonkeyCar/collected_manifest.jsonl `
-  --maps warren-track `
-  --device cpu `
-  --epochs 10
-```
-
-每个 epoch 输出一行 JSON，包含总 loss、steering loss、throttle loss、学习率、
-耗时、样本数和验证集 MAE。训练损失为：
-
-```text
-steering_mse + lambda_throttle * throttle_mse
-```
-
-使用 `--lambda-throttle` 调整油门损失权重。
 
 ## 7. 断点续训
 
@@ -239,7 +337,7 @@ steering_mse + lambda_throttle * throttle_mse
 ```powershell
 python -m apps.autodrive train `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
-  --maps warren-track `
+  --map warren-track `
   --device cuda `
   --epochs 20 `
   --resume
@@ -251,21 +349,22 @@ python -m apps.autodrive train `
 
 ## 8. 评估模型
 
-评估 Warren 模型：
+评估 Mountain 模型：
 
 ```powershell
 python -m apps.autodrive evaluate `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
-  --maps warren-track `
+  --map mountain-track `
   --device cuda
 ```
 
-程序默认加载 `checkpoints/autodrive_warren-track.npz`，输出验证集总损失、两个
+程序默认加载 `checkpoints/autodrive_mountain-track.npz`，输出验证集总损失、两个
 子损失以及 steering/throttle MAE。评估自定义权重：
 
 ```powershell
 python -m apps.autodrive evaluate `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
+  --map mountain-track `
   --checkpoint checkpoints/my_warren_model.npz `
   --device cuda
 ```
@@ -276,9 +375,9 @@ python -m apps.autodrive evaluate `
 
 ```powershell
 python -m apps.autodrive drive `
-  --config checkpoints/autodrive_warren-track.json `
+  --config checkpoints/autodrive_mountain-track.json `
   --device cuda `
-  --map warren-track `
+  --map mountain-track `
   --max-steps 6000 `
   --log-interval 50
 ```
@@ -294,7 +393,7 @@ python -m apps.autodrive drive `
 
 ## 10. 生成 Grad-CAM
 
-对一张 Warren 图片生成 steering Grad-CAM：
+对一张 Warren 地图图片生成 steering Grad-CAM：
 
 ```powershell
 python -m apps.autodrive gradcam `
@@ -332,6 +431,14 @@ python -m pytest -q
 ```powershell
 python -m pytest tests/test_autodrive_v8.py -q
 ```
+
+## 12. V11 训练监控面板
+
+V11 会在每次训练时把逐 epoch 指标写入 `runs/`，前端可以实时显示总损失、转向/油门
+子损失、MAE、学习率、耗时、CPU/GPU 资源、数据集摘要和 Grad-CAM。完整启动命令、
+run 文件结构及开发/生产模式见 [`dashboard/README.md`](dashboard/README.md)。
+前端沿用 Paddle 参考实现的四页布局，但已改为读取 KernelLeaf run。训练监控页支持
+直接启动、暂停、恢复和停止训练；数据划分和 Grad-CAM 生成仍通过命令行执行。
 
 自动化测试覆盖动态油门、采集文件、累计图片上限、manifest、控制裁剪、异常
 处理和 CPU/CUDA Grad-CAM。真实模拟器键盘交互、断连行为、赛道完成率和圈速

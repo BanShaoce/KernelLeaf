@@ -5,30 +5,6 @@ explicit `TensorOp.compute` / `TensorOp.gradient` computation graph. NumPy is
 the baseline CPU backend; CuPy provides an optional, lazily loaded CUDA array
 backend. PyTorch is not a runtime dependency.
 
-## Install
-
-CPU development environment:
-
-```bash
-pip install -e ".[dev]"
-```
-
-Optional NVIDIA CUDA 12 support:
-
-```bash
-pip install -e ".[dev,cuda]"
-```
-
-Install the optional Triton fused kernels with:
-
-```bash
-pip install -e ".[dev,cuda,triton]"
-```
-
-The CUDA extra installs CuPy plus CUDA runtime/NVRTC component wheels; an
-NVIDIA driver is still required. Apple Silicon cannot run the CUDA/CuPy path;
-use the NumPy CPU backend there.
-
 ## Quick start
 
 ```python
@@ -125,6 +101,8 @@ V7 adds framework `BatchNorm2d`/global adaptive average pooling, portable NPZ
 model+optimizer checkpoints, and a new KernelLeaf dual-head lightweight ResNet in
 `apps/autodrive`. Its manifest-only dataset uses per-map grouped splits
 (frame-number blocks for legacy data, real runs for new collections).
+Training and evaluation require exactly one `--map`; a catalog manifest may
+contain several maps, but a model never mixes their samples.
 See `apps/autodrive/README.md` for legacy DonkeyCar manifest
 conversion, training, resume, and evaluation commands. The Paddle directory is
 reference code only. The AutoDrive package now also loads paired JSON/NPZ
@@ -147,6 +125,20 @@ python -m examples.transformer_encoder_demo --device cuda
 
 See `docs/transformer.md` for mask semantics, the API, tests, and intentionally
 unsupported large-language-model features.
+
+V11 adds a local AutoDrive training dashboard: an append-only JSONL callback,
+a path-confined FastAPI service with managed training controls, and a responsive Vue monitoring
+workspace for losses, dual-head metrics, validation, resources, dataset
+statistics, and Grad-CAM outputs. Generate synthetic dashboard data and start
+the backend with:
+
+```bash
+python -m apps.autodrive dashboard-demo --run-id dashboard-demo
+python -m apps.autodrive dashboard --runs-root runs
+```
+
+See `apps/autodrive/dashboard/README.md` for Vue development/build commands and
+the real training workflow.
 
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.
