@@ -107,7 +107,9 @@ See `apps/autodrive/README.md` for legacy DonkeyCar manifest
 conversion, training, resume, and evaluation commands. The Paddle directory is
 reference code only. The AutoDrive package now also loads paired JSON/NPZ
 artifacts for safe, smoothed, dual-head closed-loop driving through an isolated
-Gym DonkeyCar adapter. V8 adds keyboard steering/dynamic-throttle collection,
+Gym DonkeyCar adapter.
+
+ V8 adds keyboard steering/dynamic-throttle collection,
 timestamped per-run records, image/label auditing, per-map grouped splitting,
 and steering/throttle Grad-CAM using KernelLeaf autograd. Run
 `python -m apps.autodrive --help` for the unified entry point and see the app
