@@ -43,7 +43,7 @@ def preprocess_rgb_frame(frame, image_size, mean=DEFAULT_MEAN, std=DEFAULT_STD):
 class AutoDriveDataset(Dataset):
     def __init__(self, manifest_path, split, *, image_size=(60, 80),
                  mean=DEFAULT_MEAN, std=DEFAULT_STD, augment=None, seed=0,
-                 maps=None):
+                 map_name):
         super().__init__()
         if split not in {"train", "val"}:
             raise ValueError("split must be 'train' or 'val'")
@@ -62,7 +62,9 @@ class AutoDriveDataset(Dataset):
             raise ValueError("augmentation is only allowed for the training split")
         self.seed = int(seed)
         self.epoch = 0
-        self.requested_maps = None if maps is None else set(maps)
+        if not isinstance(map_name, str) or not map_name.strip():
+            raise ValueError("map_name must be one non-empty map name")
+        self.map_name = map_name.strip()
         self.records = []
         with self.manifest_path.open("r", encoding="utf-8") as file:
             for line_number, line in enumerate(file, 1):
@@ -75,18 +77,13 @@ class AutoDriveDataset(Dataset):
                     raise ValueError(
                         f"invalid manifest line {line_number}: {error}"
                     ) from error
-                if record["split"] == split and (
-                    self.requested_maps is None
-                    or record["map_name"] in self.requested_maps
-                ):
+                if (record["split"] == split
+                        and record["map_name"] == self.map_name):
                     self.records.append(record)
         if not self.records:
-            suffix = "" if maps is None else f" for maps {sorted(self.requested_maps)}"
-            raise ValueError(f"manifest contains no {split!r} records{suffix}")
-
-    @property
-    def map_names(self):
-        return sorted({record["map_name"] for record in self.records})
+            raise ValueError(
+                f"manifest contains no {split!r} records for map {self.map_name!r}"
+            )
 
     @property
     def normalization(self):

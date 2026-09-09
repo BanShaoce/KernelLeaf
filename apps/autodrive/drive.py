@@ -32,6 +32,28 @@ class AutoDrivePolicy:
             self.checkpoint, self.model
         )
         saved_model = self.checkpoint_metadata.get("config", {})
+        json_map = self.config["training"].get("map")
+        saved_map = saved_model.get("map")
+        legacy_maps = saved_model.get("maps")
+        if saved_map is None and legacy_maps is not None:
+            if (not isinstance(legacy_maps, list)
+                    or len(legacy_maps) != 1
+                    or not isinstance(legacy_maps[0], str)):
+                raise ValueError(
+                    "legacy checkpoint is not a single-map model; retrain it "
+                    "with the required --map option"
+                )
+            saved_map = legacy_maps[0]
+        if json_map is not None and saved_map != json_map:
+            raise ValueError(
+                "JSON/NPZ map mismatch: "
+                f"json={json_map!r}, npz={saved_map!r}"
+            )
+        self.map_name = json_map or saved_map
+        if not self.map_name:
+            raise ValueError(
+                "model artifacts do not identify one training map"
+            )
         for key in ("base_channels", "blocks", "throttle_min", "throttle_max"):
             if key in saved_model and saved_model[key] != model_config.get(key):
                 raise ValueError(
@@ -256,6 +278,11 @@ def main():
     policy = AutoDrivePolicy(
         args.config, checkpoint=args.checkpoint, device=device
     )
+    trained_map = policy.map_name
+    if args.map != trained_map:
+        parser.error(
+            f"model was trained for map {trained_map!r}, not {args.map!r}"
+        )
     adapter = GymDonkeyAdapter(environment_name(args))
     statistics = ClosedLoopDriver(
         adapter, policy, max_steps=args.max_steps,

@@ -9,7 +9,7 @@ from kernelleaf.data import DataLoader
 from .dataset import AutoDriveDataset
 from .model import AutoDriveResNet
 from .train import (
-    default_checkpoint_path, evaluate_model, selected_manifest_maps,
+    default_checkpoint_path, evaluate_model, selected_manifest_map,
 )
 
 
@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--manifest", default="data/DonkeyCar/manifest.jsonl")
     parser.add_argument(
         "--checkpoint", default=None,
-        help="NPZ path; defaults to checkpoints/autodrive_<maps>.npz",
+        help="NPZ path; defaults to checkpoints/autodrive_<map>.npz",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -30,16 +30,21 @@ def main():
     parser.add_argument("--lambda-throttle", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument(
-        "--maps", nargs="+", default=None,
-        help="map names to evaluate; defaults to the checkpoint map set",
+        "--map", required=True,
+        help="the single manifest map name to evaluate",
     )
     args = parser.parse_args()
-    selected_maps = selected_manifest_maps(args.manifest, args.maps)
+    selected_map = selected_manifest_map(args.manifest, args.map)
     if args.checkpoint is None:
-        args.checkpoint = str(default_checkpoint_path(selected_maps))
+        args.checkpoint = str(default_checkpoint_path(selected_map))
     device = kl.cuda(0) if args.device == "cuda" else kl.cpu()
     checkpoint = kl.inspect_checkpoint(args.checkpoint)
     config = checkpoint["config"]
+    if config.get("map") != selected_map:
+        raise ValueError(
+            "checkpoint map does not match requested map: "
+            f"checkpoint={config.get('map')!r}, requested={selected_map!r}"
+        )
     normalization = checkpoint["normalization"]
     image_size = tuple(config.get(
         "image_size", [args.image_height, args.image_width]
@@ -56,7 +61,7 @@ def main():
         args.manifest, "val", image_size=image_size, augment=False,
         mean=normalization.get("mean", (0.485, 0.456, 0.406)),
         std=normalization.get("std", (0.229, 0.224, 0.225)),
-        maps=args.maps if args.maps is not None else config.get("maps"),
+        map_name=selected_map,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, device=device,

@@ -47,7 +47,7 @@ def _legacy_frame_index(path):
 
 
 def build_legacy_records(data_root, *, val_ratio=0.2, seed=256,
-                         default_throttle=0.2, group_size=500, maps=None):
+                         default_throttle=0.2, group_size=500, map_name=None):
     """Import legacy labels and create a map-stratified grouped split.
 
     The flattened legacy folders no longer retain their original drive IDs.
@@ -63,20 +63,21 @@ def build_legacy_records(data_root, *, val_ratio=0.2, seed=256,
         directory for directory in sorted(root.iterdir())
         if directory.is_dir() and any(directory.rglob("*.jpg"))
     ]
-    requested_maps = None if maps is None else set(maps)
     available_maps = {
         MAP_NAMES.get(directory.name, directory.name)
         for directory in run_directories
     }
-    if requested_maps is not None:
-        unknown = sorted(requested_maps - available_maps)
-        if unknown:
+    if map_name is not None:
+        map_name = str(map_name).strip()
+        if not map_name:
+            raise ValueError("map_name must be one non-empty map name")
+        if map_name not in available_maps:
             raise ValueError(
-                f"unknown maps {unknown}; available maps: {sorted(available_maps)}"
+                f"unknown map {map_name!r}; available maps: {sorted(available_maps)}"
             )
         run_directories = [
             directory for directory in run_directories
-            if MAP_NAMES.get(directory.name, directory.name) in requested_maps
+            if MAP_NAMES.get(directory.name, directory.name) == map_name
         ]
     if not run_directories:
         raise ValueError("no legacy image directories were selected")
@@ -147,8 +148,8 @@ def main():
         help="legacy frame numbers per pseudo-run block",
     )
     parser.add_argument(
-        "--maps", nargs="+", default=None,
-        help="map names to include; omitted means every detected map",
+        "--map", default=None,
+        help="one map to include; omitted builds a catalog of every detected map",
     )
     args = parser.parse_args()
     records = build_legacy_records(
@@ -157,7 +158,7 @@ def main():
         seed=args.seed,
         default_throttle=args.default_throttle,
         group_size=args.group_size,
-        maps=args.maps,
+        map_name=args.map,
     )
     write_manifest(records, args.output)
     counts = {

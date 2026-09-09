@@ -18,13 +18,6 @@ def map_slug(map_name):
     return slug
 
 
-def map_set_slug(map_names):
-    names = sorted({map_slug(name) for name in map_names})
-    if not names:
-        raise ValueError("at least one map is required for artifact naming")
-    return "__".join(names)
-
-
 def add_simulator_arguments(parser):
     parser.add_argument("--map", choices=sorted(MAP_ENVS), default="mountain-track")
     parser.add_argument("--env-name", default=None, help="override map environment ID")

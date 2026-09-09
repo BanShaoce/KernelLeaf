@@ -9,10 +9,10 @@ from PIL import Image
 import kernelleaf as kl
 from apps.autodrive.audit import audit_sources, group_split
 from apps.autodrive.collect import ManualControl, collect, count_collected_images
-from apps.autodrive.config import CollectionConfig, MAP_ENVS, map_set_slug
+from apps.autodrive.config import CollectionConfig, MAP_ENVS
 from apps.autodrive.gradcam import grad_cam, overlay_heatmap
 from apps.autodrive.model import AutoDriveResNet
-from apps.autodrive.train import default_checkpoint_path, selected_manifest_maps
+from apps.autodrive.train import default_checkpoint_path, selected_manifest_map
 
 
 def test_dynamic_throttle_and_steering():
@@ -144,21 +144,21 @@ def test_collection_resumes_until_cumulative_image_limit(tmp_path):
     assert json.loads(new_metadata.read_text())['samples_before_session'] == 3
 
 
-def test_map_names_determine_default_weight_filename(tmp_path):
+def test_single_map_determines_default_weight_filename(tmp_path):
     manifest = tmp_path / 'manifest.jsonl'
     manifest.write_text('\n'.join([
         json.dumps({'map_name': 'mountain-track'}),
         json.dumps({'map_name': 'generated-track'}),
     ]))
-    maps = selected_manifest_maps(manifest)
-    assert maps == ['generated-track', 'mountain-track']
-    assert map_set_slug(maps) == 'generated-track__mountain-track'
-    assert default_checkpoint_path(maps).as_posix() == (
-        'checkpoints/autodrive_generated-track__mountain-track.npz'
+    selected = selected_manifest_map(manifest, 'mountain-track')
+    assert selected == 'mountain-track'
+    assert default_checkpoint_path(selected).as_posix() == (
+        'checkpoints/autodrive_mountain-track.npz'
     )
-    assert selected_manifest_maps(manifest, ['mountain-track']) == ['mountain-track']
-    with pytest.raises(ValueError, match='unknown maps'):
-        selected_manifest_maps(manifest, ['warehouse'])
+    with pytest.raises(ValueError, match='exactly one'):
+        selected_manifest_map(manifest, '')
+    with pytest.raises(ValueError, match='unknown map'):
+        selected_manifest_map(manifest, 'warehouse')
 
 
 @pytest.mark.parametrize('head', ['steering', 'throttle'])

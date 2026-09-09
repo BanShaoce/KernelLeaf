@@ -91,27 +91,31 @@ def test_legacy_import_creates_grouped_manifest_without_run_leakage(tmp_path):
     write_manifest(records, manifest)
     circuit_split = circuit_records[0]["split"]
     split_dataset = AutoDriveDataset(
-        manifest, circuit_split, image_size=(8, 10), augment=False
+        manifest, circuit_split, image_size=(8, 10), augment=False,
+        map_name="circuit",
     )
     expected_recorded = any(
         record.get("label_source") != "default_throttle"
-        for record in records if record["split"] == circuit_split
+        for record in records
+        if record["split"] == circuit_split and record["map_name"] == "circuit"
     )
     assert split_dataset.has_recorded_throttle is expected_recorded
     circuit_only = AutoDriveDataset(
         manifest, circuit_split, image_size=(8, 10), augment=False,
-        maps=["circuit"],
+        map_name="circuit",
     )
-    assert circuit_only.map_names == ["circuit"]
+    assert circuit_only.map_name == "circuit"
 
 
 def test_manifest_dataset_preprocess_and_train_only_augmentation(tmp_path):
     manifest = _tiny_manifest(tmp_path)
     train = AutoDriveDataset(
-        manifest, "train", image_size=(8, 10), augment=True, seed=5
+        manifest, "train", image_size=(8, 10), augment=True, seed=5,
+        map_name="synthetic",
     )
     validation = AutoDriveDataset(
-        manifest, "val", image_size=(8, 10), augment=False, seed=5
+        manifest, "val", image_size=(8, 10), augment=False, seed=5,
+        map_name="synthetic",
     )
     train.set_epoch(3)
     first = train[0]
@@ -126,7 +130,7 @@ def test_manifest_dataset_preprocess_and_train_only_augmentation(tmp_path):
     for left, right in zip(before, after):
         np.testing.assert_array_equal(left, right)
     with pytest.raises(ValueError, match="only allowed"):
-        AutoDriveDataset(manifest, "val", augment=True)
+        AutoDriveDataset(manifest, "val", augment=True, map_name="synthetic")
 
 
 def _training_values(batch=4, device=None):
@@ -184,7 +188,8 @@ def test_dual_head_shapes_ranges_gradients_and_loss_decrease():
 def test_synthetic_manifest_runs_one_training_epoch(tmp_path):
     manifest = _tiny_manifest(tmp_path)
     dataset = AutoDriveDataset(
-        manifest, "train", image_size=(8, 10), augment=False
+        manifest, "train", image_size=(8, 10), augment=False,
+        map_name="synthetic",
     )
     loader = DataLoader(dataset, batch_size=4, shuffle=True, seed=3)
     model = AutoDriveResNet(base_channels=2)

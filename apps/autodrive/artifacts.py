@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 
 
-INFERENCE_CONFIG_VERSION = 1
+INFERENCE_CONFIG_VERSION = 2
 
 
 def build_inference_config(checkpoint_path, training_config, normalization, *,
@@ -51,6 +51,7 @@ def build_inference_config(checkpoint_path, training_config, normalization, *,
         },
         "training": {
             "epoch": int(epoch),
+            "map": training_config["map"],
             "manifest": training_config.get("manifest"),
             "metrics": metrics or {},
         },
@@ -58,9 +59,10 @@ def build_inference_config(checkpoint_path, training_config, normalization, *,
 
 
 def validate_inference_config(config):
-    if config.get("format_version") != INFERENCE_CONFIG_VERSION:
+    version = config.get("format_version")
+    if version not in {1, INFERENCE_CONFIG_VERSION}:
         raise ValueError("unsupported AutoDrive inference config version")
-    for section in ("checkpoint", "model", "preprocessing", "control"):
+    for section in ("checkpoint", "model", "preprocessing", "control", "training"):
         if section not in config:
             raise ValueError(f"AutoDrive config is missing {section!r}")
     preprocessing = config["preprocessing"]
@@ -69,6 +71,11 @@ def validate_inference_config(config):
     if len(preprocessing.get("image_size", [])) != 2:
         raise ValueError("preprocessing.image_size must contain height and width")
     control = config["control"]
+    map_name = config["training"].get("map")
+    if version >= 2 and (
+        not isinstance(map_name, str) or not map_name.strip()
+    ):
+        raise ValueError("training.map must contain one map name")
     for key in ("steering_smoothing", "throttle_smoothing"):
         if not 0 < float(control[key]) <= 1:
             raise ValueError(f"control.{key} must be in (0, 1]")

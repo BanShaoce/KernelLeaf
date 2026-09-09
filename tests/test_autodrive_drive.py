@@ -17,6 +17,7 @@ from apps.autodrive.model import AutoDriveResNet
 def _artifacts(tmp_path, *, checkpoint_config=None):
     model_config = {
         "manifest": "synthetic.jsonl",
+        "map": "synthetic",
         "image_size": [16, 20],
         "base_channels": 2,
         "blocks": [1, 1, 1],
@@ -58,6 +59,7 @@ def test_inference_json_roundtrip_and_relative_checkpoint(tmp_path):
     assert loaded["checkpoint"] == str(checkpoint.resolve())
     assert loaded["model"] == config["model"]
     assert loaded["training"]["epoch"] == 4
+    assert loaded["training"]["map"] == "synthetic"
     assert loaded["training"]["metrics"]["val"]["steer_mae"] == 0.2
 
 
@@ -96,6 +98,7 @@ def test_policy_uses_fixed_point_two_when_training_has_no_throttle(tmp_path):
 def test_policy_rejects_mismatched_json_and_checkpoint(tmp_path):
     mismatched = {
         "manifest": "synthetic.jsonl",
+        "map": "synthetic",
         "image_size": [16, 20],
         "base_channels": 3,
         "blocks": [1, 1, 1],
@@ -106,6 +109,33 @@ def test_policy_rejects_mismatched_json_and_checkpoint(tmp_path):
         tmp_path, checkpoint_config=mismatched
     )
     with pytest.raises(ValueError, match="JSON/NPZ model configuration mismatch"):
+        AutoDrivePolicy(config_path)
+
+
+def test_policy_loads_legacy_single_map_but_rejects_legacy_multi_map(tmp_path):
+    legacy = {
+        "manifest": "synthetic.jsonl",
+        "image_size": [16, 20],
+        "base_channels": 2,
+        "blocks": [1, 1, 1],
+        "throttle_min": 0.1,
+        "throttle_max": 0.5,
+        "maps": ["generated-track"],
+    }
+    config_path, _, _ = _artifacts(tmp_path, checkpoint_config=legacy)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["format_version"] = 1
+    config["training"].pop("map")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert AutoDrivePolicy(config_path).map_name == "generated-track"
+
+    legacy["maps"] = ["generated-track", "mountain-track"]
+    config_path, _, _ = _artifacts(tmp_path, checkpoint_config=legacy)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["format_version"] = 1
+    config["training"].pop("map")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="not a single-map model"):
         AutoDrivePolicy(config_path)
 
 
