@@ -303,7 +303,7 @@ python -m apps.autodrive train `
   --manifest data/DonkeyCar/collected_manifest.jsonl `
   --map warren-track `
   --device cuda `
-  --epochs 10 `
+  --epochs 60 `
   --batch-size 32 `
   --num-workers 2
 ```
