@@ -23,7 +23,7 @@ triton = [
     "triton>=3.2; platform_system == 'Linux'",
     "triton-windows>=3.2; platform_system == 'Windows'",
 ]
-dashboard = ["fastapi>=0.110", "uvicorn>=0.27"]
+dashboard = ["fastapi>=0.110", "uvicorn>=0.27", "psutil>=5.9"]
 autodrive = ["Pillow>=9"]
 simulator = ["gym>=0.26", "gym-donkeycar"]
 collection = ["pygame>=2", "Pillow>=9"]
