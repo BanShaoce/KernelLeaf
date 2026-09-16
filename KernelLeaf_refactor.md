@@ -522,7 +522,7 @@ benchmarks/bench_distributed.py
 
 本版本只支持同步 PS 和 Socket+JSON，不实现 async、gRPC、Ring、NCCL。
 
-## V13.1
+## V13
 
 实现 KernelLeaf V13.1：GPU资源监控与GPU训练阶段计时。
 
@@ -773,7 +773,101 @@ gpu_memory_peak_mb定义为本次Monitor生命周期内观察到的最大显存�
 
 不实现 gRPC、NCCL、RDMA。
 
-## V13.2
+## V14.1
+
+实现 KernelLeaf V14.1：基于 Socket 的 Ring AllReduce collective。
+
+先只针对 NumPy 连续一维 float32 buffer，实现：
+- flatten named gradients
+- 等长分块和 padding
+- N-1 轮 reduce-scatter
+- N-1 轮 all-gather
+- 最终除以 world_size 得到平均梯度
+- unflatten 回原参数结构
+
+每个 rank 从前一个 rank 接收，向后一个 rank 发送。
+必须复用 V12 framing/transport。
+
+测试 2 rank 和 4 rank，结果与 NumPy 直接求和/平均一致。
+记录每个 rank 的通信字节数、通信时间和等待时间。
+
+本版本不接入模型训练，不实现 NCCL。
+
+## V14.2
+
+实现 KernelLeaf V14.2：将 Socket Ring AllReduce 接入分布式训练。
+
+抽象统一的 GradientReducer 或 DistributedStrategy，使训练程序可选择：
+--strategy ps
+--strategy ring
+
+要求：
+- 两种策略复用同一模型、数据划分和训练循环。
+- Ring 模式中每个 Worker 本地保存完整模型和优化器。
+- AllReduce 后各 Worker 对相同平均梯度执行相同更新。
+- 固定随机种子时，各 Worker 参数更新后保持一致。
+- benchmark 对比 PS 与 Ring 的时间、字节数、吞吐量和收敛情况。
+
+## V15
+
+实现 KernelLeaf V15：可选的单机多 GPU NCCL AllReduce。
+
+要求：
+
+1. 不使用 PyTorch Distributed。
+2. 使用 CuPy 的 NCCL binding，延迟导入。
+3. 父进程生成 NCCL unique ID，启动每张 GPU 一个 rank。
+4. 每个 rank 绑定独立 cuda device。
+5. 首版只支持：
+   - 单机
+   - 2张或更多 NVIDIA GPU
+   - float32 连续梯度 buffer
+   - SUM 后除以 world_size
+6. 复用 V14 的 GradientReducer 接口。
+7. GPU/NCCL 不可用时给出明确原因并 skip，不能影响 CPU测试。
+8. 提供：
+   - NCCL collective correctness test
+   - 纯 AllReduce benchmark
+   - MNIST MLP/CNN 训练 smoke test
+   - 与 Socket Ring 的对比
+9. 文档包含：
+   nvidia-smi -L
+   nvidia-smi topo -m
+   NCCL 可用性检查
+   双 GPU 启动命令
+   常见错误排查
+
+不要实现跨云主机 NCCL，也不实现 RDMA。
+
+## V16
+
+实现 KernelLeaf V16：AutoDrive 分布式训练集成与最终实验工具。
+
+要求：
+
+1. 修改现有 apps/autodrive/train.py，不创建第二套重复训练系统。
+2. 支持：
+   single
+   sync PS
+   Socket Ring
+   NCCL（可用时）
+3. 同一个 map 内进行确定性的分布式数据划分。
+4. 将 distributed metrics 和 GPU metrics 写入现有 AutoDrive JSONL，
+   并尽量复用现有 Dashboard 展示：
+   - 各 Worker 状态
+   - compute/communication/wait 时间
+   - samples/sec
+   - GPU利用率和显存
+5. 增加自动实验脚本，生成统一 CSV/JSON 汇总：
+   single
+   PS 1/2/4 workers
+   Ring 2/4 workers
+   NCCL 2 GPUs
+6. 比较训练时间、吞吐量、通信占比、资源占用、验证集指标。
+7. 没有真实 DonkeyCar 数据时，测试使用合成图像和标签。
+8. 不声称真实道路或真实车辆实验结果。
+
+## V17.1
 
 实现 KernelLeaf V13.2：为MaxPool2d增加可选的CuPy RawKernel前向实现。
 
@@ -925,7 +1019,7 @@ CPU测试不能因为导入测试文件而初始化CUDA。
 
 不要commit或push。
 
-## V13.3
+## V17.2
 
 实现 KernelLeaf V13.3：MaxPool2d NumPy/CuPy/RawKernel可复现benchmark。
 
@@ -1113,7 +1207,7 @@ CUDA可用时增加短规模smoke benchmark，但不能让普通测试耗时过�
 
 不要commit或push。
 
-## V13.4
+## V17.3
 
 实现 KernelLeaf V13.4：NVTX训练阶段标记与Nsight分析入口。
 
@@ -1341,97 +1435,3 @@ CUDA和Nsight本身不要求进入自动测试。
 - git diff --stat
 
 不要commit或push。
-
-## V14.1
-
-实现 KernelLeaf V14.1：基于 Socket 的 Ring AllReduce collective。
-
-先只针对 NumPy 连续一维 float32 buffer，实现：
-- flatten named gradients
-- 等长分块和 padding
-- N-1 轮 reduce-scatter
-- N-1 轮 all-gather
-- 最终除以 world_size 得到平均梯度
-- unflatten 回原参数结构
-
-每个 rank 从前一个 rank 接收，向后一个 rank 发送。
-必须复用 V12 framing/transport。
-
-测试 2 rank 和 4 rank，结果与 NumPy 直接求和/平均一致。
-记录每个 rank 的通信字节数、通信时间和等待时间。
-
-本版本不接入模型训练，不实现 NCCL。
-
-## V14.2
-
-实现 KernelLeaf V14.2：将 Socket Ring AllReduce 接入分布式训练。
-
-抽象统一的 GradientReducer 或 DistributedStrategy，使训练程序可选择：
---strategy ps
---strategy ring
-
-要求：
-- 两种策略复用同一模型、数据划分和训练循环。
-- Ring 模式中每个 Worker 本地保存完整模型和优化器。
-- AllReduce 后各 Worker 对相同平均梯度执行相同更新。
-- 固定随机种子时，各 Worker 参数更新后保持一致。
-- benchmark 对比 PS 与 Ring 的时间、字节数、吞吐量和收敛情况。
-
-## V15
-
-实现 KernelLeaf V15：可选的单机多 GPU NCCL AllReduce。
-
-要求：
-
-1. 不使用 PyTorch Distributed。
-2. 使用 CuPy 的 NCCL binding，延迟导入。
-3. 父进程生成 NCCL unique ID，启动每张 GPU 一个 rank。
-4. 每个 rank 绑定独立 cuda device。
-5. 首版只支持：
-   - 单机
-   - 2张或更多 NVIDIA GPU
-   - float32 连续梯度 buffer
-   - SUM 后除以 world_size
-6. 复用 V14 的 GradientReducer 接口。
-7. GPU/NCCL 不可用时给出明确原因并 skip，不能影响 CPU测试。
-8. 提供：
-   - NCCL collective correctness test
-   - 纯 AllReduce benchmark
-   - MNIST MLP/CNN 训练 smoke test
-   - 与 Socket Ring 的对比
-9. 文档包含：
-   nvidia-smi -L
-   nvidia-smi topo -m
-   NCCL 可用性检查
-   双 GPU 启动命令
-   常见错误排查
-
-不要实现跨云主机 NCCL，也不实现 RDMA。
-
-## V16
-
-实现 KernelLeaf V16：AutoDrive 分布式训练集成与最终实验工具。
-
-要求：
-
-1. 修改现有 apps/autodrive/train.py，不创建第二套重复训练系统。
-2. 支持：
-   single
-   sync PS
-   Socket Ring
-   NCCL（可用时）
-3. 同一个 map 内进行确定性的分布式数据划分。
-4. 将 distributed metrics 和 GPU metrics 写入现有 AutoDrive JSONL，
-   并尽量复用现有 Dashboard 展示：
-   - 各 Worker 状态
-   - compute/communication/wait 时间
-   - samples/sec
-   - GPU利用率和显存
-5. 增加自动实验脚本，生成统一 CSV/JSON 汇总：
-   single
-   PS 1/2/4 workers
-   Ring 2/4 workers
-   NCCL 2 GPUs
-6. 比较训练时间、吞吐量、通信占比、资源占用、验证集指标。
-7. 没有真实 DonkeyCar 数据时，测试使用合成图像和标签。
-8. 不声称真实道路或真实车辆实验结果。
