@@ -21,4 +21,5 @@ from .init import ones, zeros, zeros_like, ones_like
 from . import data
 from . import nn
 from . import optim
+from . import distributed
 from .checkpoint import inspect_checkpoint, load_checkpoint, save_checkpoint

@@ -140,6 +140,18 @@ python -m apps.autodrive dashboard --runs-root runs
 See `apps/autodrive/dashboard/README.md` for Vue development/build commands and
 the real training workflow.
 
+V12.1 establishes the transport-only foundation for later distributed work:
+strict versioned messages, a replaceable codec interface, JSON ndarray
+serialization, and length-prefixed TCP framing with explicit timeout,
+disconnect, and invalid-frame errors. It intentionally contains no Parameter
+Server or distributed training loop. See `docs/distributed_protocol.md`.
+
+V12.2 adds the synchronous Parameter Server state machine and Worker protocol.
+The server alone owns the optimizer, validates stable parameter names and
+gradient schemas, weights local mean gradients by sample count, and performs
+one update per complete Worker set. See `docs/parameter_server.md`. Process
+launching and application training remain intentionally deferred to V12.3.
+
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.
 
