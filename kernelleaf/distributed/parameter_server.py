@@ -114,6 +114,7 @@ class ParameterServer:
         self._last_seen: Dict[str, float] = {}
         self._pending: Dict[str, GradientSubmission] = {}
         self._failed_reason = None
+        self.last_optimizer_time = 0.0
         self._lock = threading.RLock()
         self.step = 0
 
@@ -147,6 +148,7 @@ class ParameterServer:
         return self._response(request, MessageType.PARAMETERS, {
             "parameter_version": self.step,
             "parameters": self._parameter_entries(),
+            "optimizer_time": self.last_optimizer_time,
         })
 
     def _waiting_response(self, request):
@@ -250,10 +252,26 @@ class ParameterServer:
                 dtype=parameter.dtype,
                 requires_grad=False,
             )
+        self._synchronize_parameter_devices()
+        optimizer_started = self._clock()
         self.optimizer.step()
+        self._synchronize_parameter_devices()
+        self.last_optimizer_time = self._clock() - optimizer_started
         self.optimizer.reset_grad()
         self.step += 1
         self._pending.clear()
+
+    def _synchronize_parameter_devices(self):
+        """Make optimizer timing include queued CUDA work without eager imports."""
+        synchronized = set()
+        for _, parameter in self._named_parameters:
+            device = parameter.device
+            if device.kind != "cuda" or device in synchronized:
+                continue
+            cp = device.xp
+            with cp.cuda.Device(device.index):
+                cp.cuda.get_current_stream().synchronize()
+            synchronized.add(device)
 
     def _check_timeouts_locked(self, now=None):
         if self.heartbeat_timeout is None or self._failed_reason is not None:

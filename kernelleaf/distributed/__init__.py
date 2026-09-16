@@ -28,6 +28,12 @@ from .transport import (
     send_frame,
 )
 from .worker import Worker, WorkerProtocolError
+from .launcher import (
+    DistributedProcessError, LaunchResult, Launcher, RoleSpec,
+)
+from .monitor import (
+    METRIC_FIELDS, JsonlMonitor, MetricValidationError, validate_metric,
+)
 
 __all__ = [
     "PROTOCOL_VERSION", "Message", "MessageType", "ProtocolError",
@@ -38,4 +44,7 @@ __all__ = [
     "ParameterServer", "ParameterServerError", "ParameterSpec",
     "parameter_schema", "stable_named_parameters", "Worker",
     "WorkerProtocolError",
+    "DistributedProcessError", "LaunchResult", "Launcher", "RoleSpec",
+    "METRIC_FIELDS", "JsonlMonitor", "MetricValidationError",
+    "validate_metric",
 ]

@@ -57,7 +57,8 @@ explicit policy in a later training integration.
 7. Waiting Workers issue `PULL_PARAMETERS` for `step+1`; they receive either a
    waiting heartbeat or the new parameters.
 
-The V12.3 launcher/training loop will own polling cadence and process cleanup.
+The V12.3 launcher/training loop owns polling cadence and process cleanup; see
+`distributed_training.md`.
 
 ## Error responses
 

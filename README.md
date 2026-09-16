@@ -151,8 +151,19 @@ Server or distributed training loop. See `docs/distributed_protocol.md`.
 V12.2 adds the synchronous Parameter Server state machine and Worker protocol.
 The server alone owns the optimizer, validates stable parameter names and
 gradient schemas, weights local mean gradients by sample count, and performs
-one update per complete Worker set. See `docs/parameter_server.md`. Process
-launching and application training remain intentionally deferred to V12.3.
+one update per complete Worker set. See `docs/parameter_server.md`.
+
+V12.3 adds a Windows-safe spawn launcher, append-only JSONL monitor, and a
+single-machine synchronous MNIST MLP application with fixed-global-batch
+strong scaling for 1, 2, or 4 Workers:
+
+```bash
+python -m apps.distributed_mnist --workers 2 --epochs 5 --device cpu
+python -m benchmarks.bench_distributed --workers 1 2 4 --device cpu
+```
+
+See `docs/distributed_training.md` for role ownership, metric definitions,
+synthetic smoke testing, failure cleanup, and the CUDA verification boundary.
 
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.

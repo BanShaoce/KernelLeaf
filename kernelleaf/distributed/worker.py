@@ -89,6 +89,9 @@ class Worker:
             "gradients": entries,
         })
 
+    def shutdown_message(self):
+        return self._message(MessageType.SHUTDOWN, {})
+
     def _raise_error(self, response):
         payload = response.payload
         code = payload.get("code") if isinstance(payload, dict) else None
@@ -185,3 +188,6 @@ class Worker:
         return self.exchange(
             transport, self.gradients_message(local_sample_count)
         )
+
+    def shutdown(self, transport):
+        return self.exchange(transport, self.shutdown_message())
