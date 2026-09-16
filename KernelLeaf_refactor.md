@@ -522,64 +522,210 @@ benchmarks/bench_distributed.py
 
 本版本只支持同步 PS 和 Socket+JSON，不实现 async、gRPC、Ring、NCCL。
 
-## V13
+## V13.1
 
-实现 KernelLeaf V13：GPU 资源监控、CUDA C RawKernel 对比和 Nsight 支持。
+实现 KernelLeaf V13.1：GPU资源监控与GPU训练阶段计时。
 
-第一部分：GPU/训练监控
+开始前：
 
-1. 实现可选的 GPUResourceMonitor。
-2. 优先使用可选 NVML Python 包；不可用时尝试 nvidia-smi；
-   CPU-only 环境必须正常降级。
-3. 采集：
-   GPU utilization
-   GPU memory used/total/peak
-   temperature
-   power
-   CPU utilization
-4. 与 V12 Monitor 的 JSONL 格式集成。
-5. GPU计时时正确同步 CUDA stream，避免把异步 launch 时间当成执行时间。
+1. 阅读 AGENTS.md、README.md、现有V12分布式模块、Monitor实现、
+   AutoDrive monitoring代码以及现有计时工具。
+2. 检查git status，保留用户已有修改，不覆盖无关内容。
+3. 只实现V13.1，不实现CUDA RawKernel、算子优化、benchmark、
+   NVTX或Nsight支持。
+4. NumPy CPU必须继续正常工作。
+5. CuPy、NVML和psutil必须是可选依赖并延迟导入。
+6. 不要安装依赖，不要commit或push。
+7. 尽量扩展现有V12 Monitor和JSONL格式，不建立互不兼容的第二套监控系统。
 
-第二部分：CUDA C/C++ 算子
+目标：
 
-1. 在现有 MaxPool2d 或另一个结构简单的重要 CNN 算子上增加
-   CuPy RawKernel 实现。RawKernel 源码必须是真正的 CUDA C/C++。
-2. 保留原有 NumPy/CuPy eager fallback。
-3. 不改写 TensorOp 自动求导架构。
-4. 首版可以只优化 forward，backward 可以使用已验证的 eager fallback，
-   但文档必须明确说明。
+为KernelLeaf增加一个可选的GPUResourceMonitor，并使训练阶段计时在
+CUDA异步执行条件下仍然准确。监控结果必须能够写入V12已有的Monitor
+JSONL记录。
 
-第三部分：benchmark
+一、GPUResourceMonitor
 
-比较：
-- NumPy CPU
-- CuPy eager
-- CuPy RawKernel CUDA C
+实现可复用的GPUResourceMonitor，建议放在现有分布式监控模块附近；
+具体路径应结合当前仓库结构决定，不要机械创建重复模块。
 
-至少输出：
-- warmup 后平均执行时间
-- p50/p95
-- speedup
-- 最大绝对误差
-- 最大相对误差
-- 不同输入规模
-- H2D/D2H 是否计入
-- RawKernel 在哪些规模下才有收益
+需要支持：
 
-第四部分：Nsight
+1. 指定CUDA设备编号，例如device_index=0。
+2. start()、stop()和上下文管理器用法。
+3. 在后台定时采样，不阻塞训练主循环。
+4. sampling_interval可配置，并设置合理默认值。
+5. stop()必须可靠终止后台线程或进程，不能导致测试或程序退出时挂起。
+6. 多次start()/stop()行为明确，可以幂等或抛出清晰异常。
 
-1. 增加一个短小、确定性、带 warmup 的 profile 入口。
-2. 使用 NVTX 标记：
-   data
-   forward
-   backward
-   optimizer
-   communication
-3. 编写 docs/gpu_profiling.md，分别给出 Windows 下
-   Nsight Systems 和 Nsight Compute 的操作/命令。
-4. 不伪造 Nsight 数据；没有硬件时只实现入口和文档。
+每次采集至少包含：
 
-添加 CUDA correctness tests；没有 CUDA 时正常 skip。
+- timestamp
+- device_index
+- gpu_available
+- gpu_utilization_percent
+- gpu_memory_used_mb
+- gpu_memory_total_mb
+- gpu_memory_peak_mb
+- gpu_temperature_c
+- gpu_power_w
+- cpu_utilization_percent
+- sampling_source
+
+字段不可用时写入null，不允许伪造0值。
+
+二、采样后端与降级顺序
+
+优先级如下：
+
+1. 可选NVML Python接口
+2. nvidia-smi命令行
+3. unavailable降级状态
+
+要求：
+
+- NVML必须延迟导入。
+- CPU-only环境导入kernelleaf和distributed模块时不能报错。
+- NVML不可用时自动尝试nvidia-smi。
+- nvidia-smi不存在、超时或返回异常时不能中断训练。
+- nvidia-smi查询必须设置超时。
+- 不要在一次采样中重复启动多个不必要的子进程。
+- 记录实际使用的sampling_source，例如nvml、nvidia-smi或unavailable。
+- 错误原因可以记录到状态或日志，但不能在每次采样时反复刷屏。
+- 不得因为检测GPU而在模块导入阶段创建CUDA context。
+
+gpu_memory_peak_mb定义为本次Monitor生命周期内观察到的最大显存占用，
+不是虚构的硬件级精确峰值。文档中必须说明这一点。
+
+三、CPU资源采集
+
+优先使用可选psutil获取CPU利用率。
+
+要求：
+
+- psutil不可用时正常降级，cpu_utilization_percent写入null。
+- psutil不能成为kernelleaf的硬依赖。
+- 不要为了CPU利用率自行实现平台相关且不可靠的解析代码。
+
+四、训练阶段计时
+
+检查并扩展现有V12计时体系，使以下阶段可以准确计时：
+
+- data
+- forward
+- backward
+- optimizer
+- communication
+- total_step
+
+要求：
+
+1. CPU计时使用高精度单调时钟。
+2. CUDA训练时，计时边界必须正确同步相关CuPy CUDA stream。
+3. 同步操作必须只发生在需要准确测量的计时模式下。
+4. 不要在普通关闭监控的训练模式中无条件为每个小操作同步GPU，
+   以免改变正常训练性能。
+5. 禁止通过把整个Tensor隐式复制到CPU来完成计时。
+6. 提供一个集中管理的同步辅助函数；CPU设备上是no-op。
+7. 不要在多个训练脚本中复制粘贴CuPy同步代码。
+8. CuPy必须延迟导入。
+
+可以根据现有项目风格选择：
+- context manager形式的PhaseTimer；
+- 或扩展现有计时类。
+
+不要同时保留两套功能重复的计时API。
+
+五、与V12 Monitor/JSONL集成
+
+复用V12已有JSONL记录，不另起不兼容格式。
+
+要求：
+
+1. GPU资源采样能够与run_id、worker_id和训练step/epoch关联。
+2. 至少支持两类记录：
+   - resource_sample
+   - training_step或现有等价事件
+3. 每条记录有明确event_type和timestamp。
+4. 不要求每个训练step都对应一次GPU采样，因为资源采样是周期性的。
+5. 多Worker写入时不能互相破坏JSONL内容。
+6. 如果V12已经规定由独立Monitor进程统一写文件，应继续采用该设计，
+   Worker只发送指标，不能绕过Monitor直接竞争写文件。
+7. 保持已有V12字段向后兼容。
+
+六、命令行与示例
+
+在现有分布式MNIST入口中加入最小配置，例如：
+
+- --monitor-resources
+- --resource-sample-interval
+- --gpu-index
+
+具体参数名可以遵循现有CLI风格。
+
+要求：
+
+- CPU运行时开启资源监控不会报错。
+- CUDA Worker可以指定对应GPU编号。
+- 默认关闭资源监控或使用不会显著影响训练的配置。
+- README或docs中提供CPU和CUDA示例。
+- 不宣称没有实际测量过的性能数据。
+
+七、测试
+
+增加CPU环境即可运行的测试，至少覆盖：
+
+1. GPU监控模块在无NVML、无nvidia-smi时正常降级。
+2. 通过mock验证优先选择NVML。
+3. NVML失败后能够切换到nvidia-smi。
+4. nvidia-smi输出解析正确。
+5. nvidia-smi超时或返回错误不会导致训练失败。
+6. peak memory随采样结果正确更新。
+7. start/stop后后台采样任务确实退出。
+8. JSONL记录包含event_type、timestamp、run_id和worker_id。
+9. JSONL中的null值符合JSON规范，不产生NaN或Infinity。
+10. 通过mock验证CUDA计时会在阶段边界调用同步。
+11. CPU计时不会导入CuPy，也不会调用CUDA同步。
+12. 现有V12 Monitor和分布式测试继续通过。
+
+如果测试环境存在真实CUDA，可以增加GPU smoke test；否则必须正常skip。
+测试不能要求真实GPU、NVML、nvidia-smi或MNIST数据。
+
+八、文档
+
+新增或更新监控文档，说明：
+
+- 采集字段及单位
+- NVML、nvidia-smi、unavailable的降级顺序
+- observed peak memory的含义
+- 资源采样频率与监控开销
+- CUDA异步执行为何需要同步后才能准确计时
+- 开启准确阶段计时可能对性能产生扰动
+- CPU-only环境行为
+- Windows下的使用示例
+- 当前不包含CUDA算子优化、NVTX和Nsight
+
+验收标准：
+
+1. CPU-only环境可以导入并运行全部基础功能。
+2. 没有监控依赖时训练不会失败。
+3. GPU资源字段可以写入V12的JSONL体系。
+4. CUDA阶段计时显式处理异步执行。
+5. 监控线程或进程能够干净退出。
+6. 没有新增RawKernel、CUDA C源码或算子实现。
+7. 现有完整测试集不回归。
+
+完成后输出：
+
+- 修改文件列表
+- 监控数据流说明
+- JSONL示例记录
+- 实际运行的测试和结果
+- 未在真实Windows NVIDIA硬件上验证的部分
+- git diff --stat
+- V13.2开始前需要决定的问题
+
+不要commit或push。
 
 ## V12.4
 
@@ -626,6 +772,575 @@ benchmarks/bench_distributed.py
    - 不应期待 Wi‑Fi 获得线性加速
 
 不实现 gRPC、NCCL、RDMA。
+
+## V13.2
+
+实现 KernelLeaf V13.2：为MaxPool2d增加可选的CuPy RawKernel前向实现。
+
+开始前：
+
+1. 阅读AGENTS.md、README.md、V13.1实现，以及现有：
+   - kernelleaf/ops/ops_conv.py
+   - kernelleaf/nn/nn_basic.py
+   - kernelleaf/kernels/
+   - tests/test_pool_optimized.py
+2. 检查git status，保留已有修改。
+3. 只实现V13.2，不实现benchmark、NVTX或Nsight。
+4. 不改变TensorOp.compute / TensorOp.gradient自动求导架构。
+5. NumPy CPU路径必须保持可用。
+6. CuPy必须延迟导入，CPU-only导入不能失败。
+7. 不使用PyTorch。
+8. 不安装依赖，不commit或push。
+
+目标：
+
+使用CuPy RawKernel编写一个真正的CUDA C/C++ MaxPool2d forward kernel，
+并接入现有KernelLeaf MaxPool2d。保留现有NumPy/CuPy eager实现作为
+正确性参考和fallback。
+
+一、实现范围
+
+1. 首版只实现MaxPool2d forward RawKernel。
+2. backward继续使用现有已验证的eager实现。
+3. 首版只需支持当前MaxPool2d已有语义，不扩展padding、dilation、
+   ceil_mode、return_indices等新API。
+4. 至少支持：
+   - NCHW
+   - kernel_size为正整数
+   - stride为正整数
+   - contiguous float32 CuPy数组
+5. 可以根据实现可靠性增加float16支持，但不能为了扩大范围降低正确性。
+6. 不支持的dtype、shape、layout或设备必须回退eager，或在强制raw模式下
+   抛出清晰错误。
+
+二、代码组织
+
+建议新增：
+
+kernelleaf/kernels/maxpool.py
+
+CUDA C/C++源码可以放在Python字符串或独立.cu资源中，但必须：
+
+- 使用CuPy RawKernel或RawModule编译；
+- 包含清晰的线程到输出元素映射；
+- 进行完整边界检查；
+- 使用正确的NCHW索引；
+- 不进行不必要的GPU到CPU复制；
+- 缓存已编译kernel，避免每次forward重新编译；
+- 不在模块导入时初始化CUDA context。
+
+不要把CUDA源码直接堆入ops_conv.py；算子调度与kernel实现应分离。
+
+三、接口与调度
+
+在现有MaxPool2d接口上增加与项目风格一致的implementation选择，例如：
+
+- implementation="auto"
+- implementation="eager"
+- implementation="raw"
+
+具体命名应先检查Conv2d和现有融合算子的风格。
+
+行为：
+
+1. CPU：
+   - auto → eager
+   - eager → eager
+   - raw → 抛出清晰错误
+
+2. CUDA且满足RawKernel约束：
+   - auto → raw
+   - eager → eager
+   - raw → raw
+
+3. CUDA但不满足约束：
+   - auto → eager fallback
+   - raw → 抛出包含具体原因的错误
+
+如果现有API不适合直接增加参数，应做最小兼容扩展，不能破坏旧代码。
+
+四、forward与backward一致性
+
+1. RawKernel输出必须与现有eager输出在允许误差内一致。
+2. backward继续使用现有TensorOp.gradient逻辑。
+3. 必须验证：
+   - forward使用raw、backward使用eager时梯度正确；
+   - 不会因为forward路径不同破坏计算图；
+   - 不会在backward中错误复用不存在的CUDA临时对象。
+4. 相同最大值出现多次时，梯度分配语义必须与现有eager实现一致。
+   如果现有实现本身没有明确语义，应先通过测试确认，再记录到文档。
+5. 需要明确NaN行为；至少不能出现raw与eager静默产生完全不同结果的情况。
+
+五、测试
+
+添加或扩展CUDA correctness tests，覆盖：
+
+- 多种N、C、H、W
+- kernel_size 2和3
+- stride 1、2以及非默认值
+- 输出边界不能整除的情况
+- 正数、负数和混合输入
+- 多个相同最大值
+- float32
+- 如果实现了float16，则测试float16
+- 非contiguous输入的fallback或错误
+- CPU auto路径仍使用eager
+- 强制raw但没有CUDA时给出清晰错误
+- raw forward + eager backward梯度与参考实现一致
+- kernel缓存被复用
+
+CUDA测试在没有可用CUDA/CuPy时正常skip。
+CPU测试不能因为导入测试文件而初始化CUDA。
+
+六、文档
+
+新增或更新MaxPool2d文档，说明：
+
+- eager和raw两条路径；
+- auto调度条件；
+- 支持的dtype、layout、kernel_size和stride；
+- backward仍使用eager；
+- fallback策略；
+- RawKernel通过NVRTC首次编译，第一次调用不代表稳定执行时间；
+- 当前没有性能结论，性能比较属于V13.3。
+
+验收标准：
+
+1. CPU完整测试集不回归。
+2. CUDA可用时raw与eager forward一致。
+3. raw forward下backward仍正确。
+4. CPU-only环境导入KernelLeaf正常。
+5. 不支持的输入不会静默产生错误结果。
+6. 本版本没有benchmark、NVTX或Nsight代码。
+
+完成后报告：
+
+- 修改文件
+- CUDA线程映射和索引方式
+- auto/eager/raw调度规则
+- correctness测试结果
+- 未验证的GPU路径
+- git diff --stat
+- V13.3需要benchmark的shape和dtype集合
+
+不要commit或push。
+
+## V13.3
+
+实现 KernelLeaf V13.3：MaxPool2d NumPy/CuPy/RawKernel可复现benchmark。
+
+开始前：
+
+1. 阅读AGENTS.md、V13.1计时工具、V13.2 MaxPool2d RawKernel、
+   现有benchmarks目录及benchmark风格。
+2. 检查git status，保留已有修改。
+3. 本版本只增加benchmark和相关测试，不修改RawKernel算法。
+4. 不实现NVTX或Nsight。
+5. 不安装依赖，不commit或push。
+6. 不伪造任何GPU测试数据。
+
+目标：
+
+在相同输入上比较：
+
+- NumPy CPU eager
+- CuPy GPU eager
+- CuPy GPU RawKernel
+
+正确区分kernel首次编译、稳定执行和H2D/D2H数据传输时间。
+
+一、benchmark入口
+
+建议新增：
+
+benchmarks/bench_maxpool_cuda.py
+
+提供命令行参数：
+
+- --shapes
+- --kernel-size
+- --stride
+- --dtype
+- --warmup
+- --iterations
+- --include-transfers
+- --output-json
+- --output-csv
+- --seed
+
+具体参数形式可结合现有benchmark风格调整。
+
+二、输入规模
+
+至少包含small、medium、large三组NCHW输入。
+
+应选择能体现以下情况的规模：
+
+- 很小的输入：kernel launch开销占主导；
+- 中等CNN feature map；
+- 较大的batch或feature map；
+- kernel_size=2和3；
+- stride=1和2。
+
+所有实现必须使用由同一个固定随机种子生成的逻辑输入。
+
+三、正确性检查
+
+每个shape在进入计时前先检查：
+
+- eager输出与NumPy参考输出；
+- raw输出与NumPy参考输出；
+- 最大绝对误差；
+- 最大相对误差；
+- 是否包含NaN或Infinity。
+
+正确性不通过时：
+
+- 该配置不得继续输出看似有效的性能数据；
+- benchmark应返回明确失败状态；
+- 不能只打印warning后继续。
+
+四、GPU计时
+
+1. GPU计时必须处理CUDA异步执行。
+2. 优先复用V13.1已有计时/同步辅助函数。
+3. 可以使用CUDA Event或同步后的高精度时钟，但必须在文档说明。
+4. warmup不计入稳定执行统计。
+5. RawKernel首次NVRTC编译时间单独记录，不混入steady-state结果。
+6. 每次实现切换前应避免上一次异步任务污染计时。
+7. 不要在每次迭代中无意义地重新分配输入或重新编译kernel。
+
+五、H2D/D2H口径
+
+默认结果只测算子执行时间，不包含：
+
+- NumPy→CuPy的H2D
+- CuPy→NumPy的D2H
+
+当指定--include-transfers时，额外测量：
+
+- H2D时间
+- kernel时间
+- D2H时间
+- 端到端时间
+
+输出必须明确标记测试口径，不能把两类数据混在同一个speedup中。
+
+六、统计指标
+
+每种实现、每个shape至少输出：
+
+- implementation
+- shape
+- dtype
+- kernel_size
+- stride
+- warmup次数
+- iteration次数
+- compile_time_ms
+- mean_ms
+- p50_ms
+- p95_ms
+- standard_deviation_ms
+- speedup_vs_numpy
+- speedup_vs_cupy_eager
+- max_absolute_error
+- max_relative_error
+- h2d_ms
+- d2h_ms
+- transfers_included
+- device_name
+- CUDA/CuPy版本（可用时）
+
+speedup的分母和分子必须定义清楚。
+
+七、输出
+
+1. 默认打印可读表格。
+2. 可选输出JSON和CSV。
+3. 默认不向仓库写大型日志。
+4. 输出路径由用户显式指定。
+5. JSON中不能出现NaN或Infinity等非标准值。
+6. 没有CUDA时给出清晰提示，而不是长堆栈。
+
+八、测试
+
+增加CPU环境可运行的测试，至少验证：
+
+- percentile计算正确；
+- speedup计算正确；
+- JSON结果可被标准json模块读取；
+- CSV列稳定；
+- 非有限数不会写入结果；
+- correctness失败时不会产生有效性能记录；
+- CLI参数校验；
+- 没有CUDA时行为明确。
+
+CUDA可用时增加短规模smoke benchmark，但不能让普通测试耗时过长。
+
+九、文档
+
+新增或更新benchmark文档，说明：
+
+- warmup原因；
+- CUDA异步执行；
+- NVRTC首次编译开销；
+- H2D/D2H是否计入；
+- 小算子为什么可能不适合RawKernel；
+- benchmark不能直接代表完整模型训练加速；
+- 如何复现实验；
+- 没有实测数据时不填写虚构结果。
+
+验收标准：
+
+1. 三种路径使用相同逻辑输入。
+2. 正确性检查先于性能统计。
+3. GPU计时完成必要同步。
+4. 编译时间与稳定执行时间分离。
+5. 输出包含平均值、p50、p95、speedup和误差。
+6. 不修改V13.2的kernel算法。
+7. CPU完整测试集不回归。
+
+完成后报告：
+
+- 修改文件
+- benchmark计时口径
+- 默认shape集合
+- 实际运行结果；无GPU时明确说明未运行
+- 测试结果
+- git diff --stat
+- 哪些规模需要在真实Windows NVIDIA设备上补测
+
+不要commit或push。
+
+## V13.4
+
+实现 KernelLeaf V13.4：NVTX训练阶段标记与Nsight分析入口。
+
+开始前：
+
+1. 阅读AGENTS.md、README.md、V12分布式训练、V13.1资源监控和计时实现。
+2. 如果V13.2/V13.3存在，可以使用它们，但不得依赖它们才能运行。
+3. 检查git status，保留已有修改。
+4. 本版本不实现或修改CUDA kernel。
+5. 不安装Nsight或其他系统软件。
+6. 不生成、提交.nsys-rep、.ncu-rep或大型日志。
+7. 不伪造性能分析结果。
+8. 不commit或push。
+
+目标：
+
+为KernelLeaf提供可选、低侵入的NVTX标记和确定性的GPU profiling入口，
+使Windows NVIDIA环境可以使用Nsight Systems和Nsight Compute分析
+训练过程。
+
+一、NVTX抽象
+
+实现一个很小的可选NVTX封装，例如：
+
+- nvtx_range(name, color=None)
+- push_range(name)
+- pop_range()
+
+要求：
+
+1. 优先复用CuPy提供的NVTX能力。
+2. CuPy/NVTX不可用时自动退化为no-op。
+3. CPU-only环境导入时不能初始化CUDA。
+4. 禁用profiling时不能引入明显开销。
+5. context manager即使内部抛异常也必须正确结束range。
+6. 不在训练代码中散落大量直接的CuPy NVTX调用。
+
+二、训练阶段标记
+
+在现有统一训练循环或V13.1 PhaseTimer边界上增加可选NVTX标记：
+
+- data
+- forward
+- backward
+- optimizer
+- communication
+- step
+- epoch
+
+要求：
+
+1. 与V13.1的阶段定义保持一致。
+2. 不创建第二套互相矛盾的阶段计时系统。
+3. NVTX默认关闭，通过CLI显式启用。
+4. range必须正确嵌套，例如：
+   epoch
+     step
+       data
+       forward
+       backward
+       communication
+       optimizer
+5. 多Worker时range名称包含必要的worker/rank信息，但不能无限生成高基数字符串。
+6. NVTX只能标记现有工作，不能为了让时间线好看而改变训练顺序。
+
+三、确定性profile入口
+
+建议新增：
+
+benchmarks/profile_training.py
+
+或者扩展现有分布式MNIST入口的profile子命令。
+
+要求：
+
+1. 使用固定随机种子和合成数据，不依赖下载MNIST。
+2. 使用小型确定性MLP或CNN。
+3. 支持：
+   - CPU模式，用于验证入口
+   - cuda:0单Worker
+   - 可选本地PS通信模式
+4. 包含：
+   - 若干warmup steps
+   - 少量profile steps
+   - 明确结束
+5. 默认运行时间短，避免生成巨大trace。
+6. profile阶段不包含模型初始化和首次CUDA context创建，或在文档中明确区分。
+7. 如果V13.2存在，可以通过参数选择eager/raw，但这不是本版本的依赖。
+8. 没有CUDA时给出清晰提示。
+
+建议参数：
+
+- --device
+- --warmup-steps
+- --profile-steps
+- --enable-nvtx
+- --distributed-mode
+- --implementation
+- --seed
+
+具体名称遵循现有CLI风格。
+
+四、Nsight Systems文档
+
+编写docs/gpu_profiling.md，提供Windows示例。
+
+至少包括：
+
+1. Nsight Systems用途：
+   - 查看CPU线程和CUDA时间线
+   - kernel launch
+   - CUDA同步
+   - H2D/D2H
+   - Worker等待
+   - communication与compute比例
+
+2. CLI示例，按实际入口调整，例如：
+
+nsys.exe profile ^
+  --trace=cuda,nvtx,osrt ^
+  --force-overwrite=true ^
+  --output=artifacts/kernelleaf_training ^
+  python -m benchmarks.profile_training ^
+  --device cuda:0 ^
+  --enable-nvtx ^
+  --warmup-steps 10 ^
+  --profile-steps 20
+
+3. 如何用Nsight Systems GUI打开报告。
+4. 如何根据NVTX范围定位data、forward、backward、optimizer和communication。
+5. 如何识别：
+   - CPU等待GPU
+   - GPU空闲
+   - 频繁同步
+   - H2D/D2H过多
+   - 通信等待
+   - kernel过碎
+
+五、Nsight Compute文档
+
+说明Nsight Compute主要分析单个CUDA kernel，而不是完整训练时间线。
+
+提供CLI示例，按实际入口和工具支持调整，例如：
+
+ncu.exe ^
+  --target-processes all ^
+  --set basic ^
+  --launch-count 10 ^
+  --export artifacts/kernelleaf_kernel ^
+  python -m benchmarks.profile_training ^
+  --device cuda:0 ^
+  --warmup-steps 10 ^
+  --profile-steps 5
+
+文档说明如何进一步使用kernel-name过滤，避免分析整个训练中的所有kernel。
+
+至少解释以下指标的用途：
+
+- kernel duration
+- achieved occupancy
+- SM throughput
+- memory throughput
+- memory workload
+- launch dimensions
+- warp stall reasons
+
+不要把高occupancy直接等同于高性能。
+
+六、多进程注意事项
+
+文档必须说明：
+
+- Nsight分析多进程时报告会明显增大；
+- 先分析单Worker，再分析PS/多Worker；
+- --target-processes all可能捕获所有子进程；
+- Windows spawn会产生额外Python进程；
+- 应减少profile steps；
+- Monitor采样和nvidia-smi本身可能出现在时间线上；
+- 分析训练性能时可分别进行“开启资源监控”和“关闭资源监控”的实验。
+
+七、测试
+
+CPU环境即可运行的测试至少覆盖：
+
+1. NVTX不可用时context manager是no-op。
+2. mock NVTX后push/pop顺序正确。
+3. context内部抛异常时仍会pop。
+4. 嵌套range顺序正确。
+5. profiling关闭时不会导入CuPy。
+6. CPU profile入口能够运行并退出。
+7. warmup与profile step数量正确。
+8. CLI错误参数能够给出清晰提示。
+
+CUDA和Nsight本身不要求进入自动测试。
+
+八、文档边界
+
+明确说明：
+
+- KernelLeaf只提供NVTX标记和可分析入口；
+- Nsight是外部NVIDIA工具；
+- 没有生成报告不代表代码错误；
+- 仓库中不保存大型Nsight报告；
+- 本版本没有新增CUDA算子；
+- 所有性能结论必须来自真实硬件实测。
+
+验收标准：
+
+1. CPU-only环境正常工作。
+2. NVTX不可用时训练不受影响。
+3. profiling入口短小、确定性、带warmup。
+4. data/forward/backward/optimizer/communication范围清晰。
+5. Windows Nsight Systems与Compute命令完整。
+6. 没有新增或修改CUDA kernel。
+7. 不包含伪造的Nsight结果。
+
+完成后报告：
+
+- 修改文件
+- NVTX范围层级
+- profile入口使用方式
+- 实际运行的测试
+- 需要在真实Windows NVIDIA机器上执行的命令
+- 未验证部分
+- git diff --stat
+
+不要commit或push。
 
 ## V14.1
 
