@@ -25,4 +25,3 @@ data/MNIST/*
 !data/MNIST/raw/
 data/MNIST/raw/*
 /apps/auto-drive(paddle)
-/KernelLeaf_refactor.md
