@@ -166,6 +166,20 @@ python -m benchmarks.bench_distributed --model lenet5 --workers 1 2 4 --device c
 See `docs/distributed_training.md` for role ownership, metric definitions,
 synthetic smoke testing, failure cleanup, and the CUDA verification boundary.
 
+PR #2's sparse logistic-regression and collapsed-Gibbs LDA experiments are
+available as an isolated experiment package. Their sparse key/value runtime is
+kept separate from the canonical V12–V16 dense Tensor training stack:
+
+```bash
+python -m experiments.distributed.run_experiments --experiment lr --transport socket --mode sync --workers 4 --shards 2
+python -m experiments.distributed.run_experiments --experiment lda --transport socket --mode async --workers 4 --shards 2
+python -m experiments.distributed.benchmark_table --skip-grpc
+```
+
+See `experiments/distributed/README.md` and
+`docs/sparse_parameter_server.md` for provenance, optional gRPC setup,
+architecture, and benchmark definitions.
+
 The first V16 AutoDrive integration slice reuses the same synchronous PS
 runtime for deterministic single-map `single/1/2/4 Worker` experiments. It
 produces timestamped model checkpoints plus CSV/JSON summaries without yet
