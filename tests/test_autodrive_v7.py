@@ -13,7 +13,10 @@ from apps.autodrive.manifest import (
     REQUIRED_FIELDS, build_legacy_records, write_manifest,
 )
 from apps.autodrive.model import AutoDriveResNet
-from apps.autodrive.train import mse_loss, train_epoch
+from apps.autodrive.train import (
+    AutoDriveBenchmarkConfig, mse_loss, run_autodrive_ps_benchmark,
+    run_autodrive_single_benchmark, train_epoch,
+)
 
 
 def _image(path, value):
@@ -199,6 +202,60 @@ def test_synthetic_manifest_runs_one_training_epoch(tmp_path):
     assert metrics["loss"] >= 0
     assert metrics["steer_loss"] >= 0
     assert metrics["throttle_loss"] >= 0
+
+
+def test_autodrive_single_and_two_worker_ps_benchmark_save_models(tmp_path):
+    manifest = _tiny_manifest(tmp_path)
+    common = dict(
+        manifest=str(manifest), map_name="synthetic", epochs=1,
+        global_batch_size=4, base_channels=2,
+        image_height=8, image_width=10, socket_timeout=10.0,
+    )
+    single_path = tmp_path / "bin" / "single.npz"
+    single = run_autodrive_single_benchmark(
+        AutoDriveBenchmarkConfig(world_size=1, **common), single_path
+    )
+    ps_path = tmp_path / "bin" / "ps-2w.npz"
+    ps = run_autodrive_ps_benchmark(
+        AutoDriveBenchmarkConfig(world_size=2, **common), ps_path,
+        tmp_path / "metrics" / "ps-2w.jsonl", timeout=30.0,
+    )
+    assert single_path.is_file() and ps_path.is_file()
+    assert single["workers"] == 0 and ps["workers"] == 2
+    assert single["steps"] == ps["steps"] == 1
+    assert np.isfinite(single["validation"]["loss"])
+    assert np.isfinite(ps["validation"]["loss"])
+    assert 0 <= ps["communication_ratio"] <= 1
+    assert set(ps["exitcodes"].values()) == {0}
+    assert kl.inspect_checkpoint(ps_path)["config"]["map"] == "synthetic"
+
+
+def test_autodrive_benchmark_cli_defaults_to_mountain_and_ten_epochs():
+    from benchmarks.bench_autodrive_distributed import build_parser
+
+    args = build_parser().parse_args([])
+    assert args.map == "mountain-track"
+    assert args.epochs == 10
+    assert tuple(args.workers) == (1, 2, 4)
+    assert args.output_dir == "bin"
+
+
+@pytest.mark.skipif(not kl.is_cuda_available(), reason="CUDA is unavailable")
+def test_autodrive_one_worker_ps_benchmark_on_cuda(tmp_path):
+    manifest = _tiny_manifest(tmp_path)
+    config = AutoDriveBenchmarkConfig(
+        manifest=str(manifest), map_name="synthetic", world_size=1,
+        epochs=1, global_batch_size=4, base_channels=2,
+        image_height=8, image_width=10, device="cuda", socket_timeout=30.0,
+    )
+    checkpoint = tmp_path / "cuda-bin" / "ps-1w.npz"
+    result = run_autodrive_ps_benchmark(
+        config, checkpoint, tmp_path / "cuda-metrics.jsonl", timeout=60.0,
+    )
+    assert checkpoint.is_file()
+    assert result["workers"] == 1
+    assert set(result["exitcodes"].values()) == {0}
+    assert np.isfinite(result["validation"]["loss"])
 
 
 def test_checkpoint_restores_model_optimizer_and_metadata(tmp_path):

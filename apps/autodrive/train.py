@@ -1,8 +1,11 @@
 """Train the KernelLeaf dual-head AutoDrive ResNet with V11 telemetry."""
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
+import socket
+import threading
 import time
 
 import numpy as np
@@ -10,6 +13,11 @@ import numpy as np
 import kernelleaf as kl
 import kernelleaf.nn as nn
 from kernelleaf.data import DataLoader
+from kernelleaf.distributed import (
+    FramedTransport, JsonCodec, Launcher, ParameterServer, RoleSpec, Worker,
+    connect_with_retry, monitor_process, push_gradients_and_wait,
+    reserve_local_port,
+)
 
 from .dataset import AutoDriveDataset, DEFAULT_MEAN, DEFAULT_STD
 from .model import AutoDriveResNet
@@ -128,6 +136,379 @@ def _configuration(args):
         "grad_clip_norm": args.grad_clip_norm,
         "seed": args.seed,
         "map": args.map,
+    }
+
+
+@dataclass(frozen=True)
+class AutoDriveBenchmarkConfig:
+    """Pickle-safe configuration for the first V16 PS benchmark slice."""
+
+    manifest: str = "data/DonkeyCar/manifest.jsonl"
+    map_name: str = "mountain-track"
+    world_size: int = 1
+    epochs: int = 10
+    global_batch_size: int = 32
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    lambda_throttle: float = 1.0
+    base_channels: int = 16
+    image_height: int = 60
+    image_width: int = 80
+    throttle_min: float = 0.0
+    throttle_max: float = 1.0
+    seed: int = 7
+    device: str = "cpu"
+    socket_timeout: float = 120.0
+    poll_interval: float = 0.01
+
+    def __post_init__(self):
+        if self.world_size not in (1, 2, 4):
+            raise ValueError("world_size must be 1, 2, or 4")
+        if self.epochs <= 0 or self.global_batch_size < self.world_size:
+            raise ValueError(
+                "epochs must be positive and global_batch_size >= world_size"
+            )
+        if self.learning_rate <= 0 or self.weight_decay < 0:
+            raise ValueError("invalid optimizer configuration")
+        if self.lambda_throttle < 0 or self.base_channels <= 0:
+            raise ValueError("invalid loss/model configuration")
+        if min(self.image_height, self.image_width) <= 0:
+            raise ValueError("image dimensions must be positive")
+        if self.device not in ("cpu", "cuda"):
+            raise ValueError("device must be cpu or cuda")
+        if self.socket_timeout <= 0 or self.poll_interval <= 0:
+            raise ValueError("distributed timeouts must be positive")
+        if not isinstance(self.map_name, str) or not self.map_name.strip():
+            raise ValueError("map_name must be non-empty")
+
+
+def _benchmark_device(config):
+    return kl.cuda(0) if config.device == "cuda" else kl.cpu()
+
+
+def _benchmark_model(config):
+    np.random.seed(config.seed)
+    return AutoDriveResNet(
+        base_channels=config.base_channels,
+        throttle_min=config.throttle_min,
+        throttle_max=config.throttle_max,
+        device=_benchmark_device(config),
+    )
+
+
+def _benchmark_dataset(config, split, *, augment):
+    return AutoDriveDataset(
+        config.manifest, split,
+        image_size=(config.image_height, config.image_width),
+        augment=augment, seed=config.seed, map_name=config.map_name,
+    )
+
+
+def _benchmark_checkpoint_config(config, mode):
+    return {
+        "manifest": str(config.manifest),
+        "image_size": [config.image_height, config.image_width],
+        "base_channels": config.base_channels,
+        "blocks": [1, 1, 1],
+        "throttle_min": config.throttle_min,
+        "throttle_max": config.throttle_max,
+        "lambda_throttle": config.lambda_throttle,
+        "batch_size": config.global_batch_size,
+        "lr": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "grad_clip_norm": 0.0,
+        "seed": config.seed,
+        "map": config.map_name,
+        "benchmark_mode": mode,
+        "world_size": 0 if mode == "single_process" else config.world_size,
+    }
+
+
+def _benchmark_global_batches(sample_count, config, epoch):
+    if sample_count < config.world_size:
+        raise ValueError("dataset must contain at least one sample per Worker")
+    rng = np.random.default_rng(np.random.SeedSequence([config.seed, epoch]))
+    indices = rng.permutation(sample_count)
+    batches = [
+        indices[start:start + config.global_batch_size]
+        for start in range(0, sample_count, config.global_batch_size)
+    ]
+    if len(batches[-1]) < config.world_size:
+        raise ValueError(
+            "final global batch is smaller than world_size; choose a compatible "
+            "global_batch_size"
+        )
+    return batches
+
+
+def _synchronize_benchmark_device(device):
+    if device.kind == "cuda":
+        cp = device.xp
+        with cp.cuda.Device(device.index):
+            cp.cuda.get_current_stream().synchronize()
+
+
+def _benchmark_forward_loss(model, images, steering_target, throttle_target,
+                            lambda_throttle):
+    steering, throttle = model(images)
+    steering_loss = mse_loss(steering, steering_target)
+    throttle_loss = mse_loss(throttle, throttle_target)
+    loss = steering_loss + lambda_throttle * throttle_loss
+    return loss, steering_loss, throttle_loss
+
+
+def _evaluate_benchmark_checkpoint(config, checkpoint_path):
+    device = _benchmark_device(config)
+    model = _benchmark_model(config)
+    kl.load_checkpoint(checkpoint_path, model)
+    dataset = _benchmark_dataset(config, "val", augment=False)
+    loader = DataLoader(
+        dataset, batch_size=config.global_batch_size, shuffle=False,
+        device=device, num_workers=0,
+    )
+    return evaluate_model(model, loader, config.lambda_throttle)
+
+
+def run_autodrive_single_benchmark(config, checkpoint_path):
+    """Run the no-distribution reference with the same batches and model."""
+    if not isinstance(config, AutoDriveBenchmarkConfig):
+        raise TypeError("config must be AutoDriveBenchmarkConfig")
+    started = time.perf_counter()
+    device = _benchmark_device(config)
+    dataset = _benchmark_dataset(config, "train", augment=True)
+    model = _benchmark_model(config)
+    model.train()
+    optimizer = kl.optim.Adam(
+        model.parameters(), lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+    first_loss = None
+    last_loss = None
+    steps = 0
+    for epoch in range(config.epochs):
+        dataset.set_epoch(epoch)
+        for indices in _benchmark_global_batches(len(dataset), config, epoch):
+            arrays = dataset.get_batch(indices)
+            images, steering_target, throttle_target = (
+                kl.Tensor(value, device=device) for value in arrays
+            )
+            optimizer.reset_grad()
+            loss, _, _ = _benchmark_forward_loss(
+                model, images, steering_target, throttle_target,
+                config.lambda_throttle,
+            )
+            value = float(loss.numpy())
+            loss.backward()
+            optimizer.step()
+            first_loss = value if first_loss is None else first_loss
+            last_loss = value
+            steps += 1
+    _synchronize_benchmark_device(device)
+    kl.save_checkpoint(
+        checkpoint_path, model, epoch=config.epochs,
+        config=_benchmark_checkpoint_config(config, "single_process"),
+        normalization=dataset.normalization,
+    )
+    elapsed = time.perf_counter() - started
+    validation = _evaluate_benchmark_checkpoint(config, checkpoint_path)
+    return {
+        "mode": "single_process", "workers": 0,
+        "elapsed": elapsed,
+        "samples_per_second": len(dataset) * config.epochs / elapsed,
+        "steps": steps, "first_loss": first_loss, "last_loss": last_loss,
+        "communication_ratio": 0.0,
+        "validation": validation, "checkpoint": str(Path(checkpoint_path)),
+    }
+
+
+def _autodrive_ps_process(stop_event, config, host, port):
+    model = _benchmark_model(config)
+    optimizer = kl.optim.Adam(
+        model.parameters(), lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+    worker_ids = [f"worker-{index}" for index in range(config.world_size)]
+    server = ParameterServer(
+        model, optimizer, worker_ids, heartbeat_timeout=config.socket_timeout,
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host, port))
+    listener.listen(config.world_size)
+    listener.settimeout(0.2)
+    threads = []
+    try:
+        while len(threads) < config.world_size and not stop_event.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            transport = FramedTransport(
+                connection, JsonCodec(), timeout=config.socket_timeout
+            )
+            thread = threading.Thread(
+                target=server.serve_connection, args=(transport,), daemon=True
+            )
+            thread.start()
+            threads.append(thread)
+        if len(threads) != config.world_size:
+            raise RuntimeError("PS stopped before every AutoDrive Worker connected")
+        while any(thread.is_alive() for thread in threads):
+            if stop_event.wait(0.05):
+                break
+        for thread in threads:
+            thread.join(timeout=1.0)
+    finally:
+        listener.close()
+
+
+def _autodrive_worker_process(stop_event, config, host, port, worker_index,
+                              metric_queue, checkpoint_path):
+    worker_id = f"worker-{worker_index}"
+    device = _benchmark_device(config)
+    dataset = _benchmark_dataset(config, "train", augment=True)
+    model = _benchmark_model(config)
+    model.train()
+    worker = Worker(worker_id, model)
+    sock = connect_with_retry(
+        host, port, config.socket_timeout, stop_event
+    )
+    transport = FramedTransport(
+        sock, JsonCodec(), timeout=config.socket_timeout
+    )
+    global_step = 0
+    try:
+        worker.register(transport)
+        for epoch in range(config.epochs):
+            dataset.set_epoch(epoch)
+            for global_indices in _benchmark_global_batches(
+                    len(dataset), config, epoch):
+                step_started = time.perf_counter()
+                data_started = time.perf_counter()
+                indices = np.array_split(
+                    global_indices, config.world_size
+                )[worker_index]
+                arrays = dataset.get_batch(indices)
+                images, steering_target, throttle_target = (
+                    kl.Tensor(value, device=device) for value in arrays
+                )
+                _synchronize_benchmark_device(device)
+                data_time = time.perf_counter() - data_started
+
+                forward_started = time.perf_counter()
+                loss, steering_loss, throttle_loss = _benchmark_forward_loss(
+                    model, images, steering_target, throttle_target,
+                    config.lambda_throttle,
+                )
+                _synchronize_benchmark_device(device)
+                forward_time = time.perf_counter() - forward_started
+                values = (
+                    float(loss.numpy()), float(steering_loss.numpy()),
+                    float(throttle_loss.numpy()),
+                )
+
+                backward_started = time.perf_counter()
+                loss.backward()
+                _synchronize_benchmark_device(device)
+                backward_time = time.perf_counter() - backward_started
+                communication = push_gradients_and_wait(
+                    worker, transport, len(indices), config.poll_interval
+                )
+                _synchronize_benchmark_device(device)
+                total_time = time.perf_counter() - step_started
+                global_step += 1
+                metric_queue.put({
+                    "epoch": epoch + 1, "step": global_step,
+                    "data_time": data_time, "forward_time": forward_time,
+                    "backward_time": backward_time, **communication,
+                    "total_step_time": total_time,
+                    "samples_per_second": len(indices) / total_time,
+                    "loss": values[0], "accuracy": 0.0,
+                    "worker_id": worker_id,
+                    "parameter_version": worker.step,
+                    "steer_loss": values[1], "throttle_loss": values[2],
+                    "local_sample_count": len(indices),
+                })
+        if worker_index == 0:
+            # Rank 0 owns the final synchronized parameters and its local
+            # BatchNorm running statistics, matching common non-SyncBN DDP.
+            kl.save_checkpoint(
+                checkpoint_path, model, epoch=config.epochs,
+                config=_benchmark_checkpoint_config(
+                    config, f"ps_{config.world_size}_workers"
+                ),
+                normalization=dataset.normalization,
+            )
+        worker.shutdown(transport)
+    finally:
+        transport.close()
+
+
+def _weighted_step_loss(records, step):
+    selected = [record for record in records if record["step"] == step]
+    samples = sum(record["local_sample_count"] for record in selected)
+    return sum(
+        record["loss"] * record["local_sample_count"] for record in selected
+    ) / samples
+
+
+def run_autodrive_ps_benchmark(config, checkpoint_path, metrics_path,
+                               *, timeout=7200.0):
+    """Run one synchronous PS AutoDrive job and return measured results."""
+    if not isinstance(config, AutoDriveBenchmarkConfig):
+        raise TypeError("config must be AutoDriveBenchmarkConfig")
+    dataset = _benchmark_dataset(config, "train", augment=True)
+    steps_per_epoch = len(_benchmark_global_batches(len(dataset), config, 0))
+    expected = steps_per_epoch * config.epochs * config.world_size
+    metrics_path = Path(metrics_path)
+    if metrics_path.exists():
+        metrics_path.unlink()
+    launcher = Launcher()
+    metric_queue = launcher.queue()
+    host = "127.0.0.1"
+    port = reserve_local_port(host)
+    specs = [
+        RoleSpec("monitor", monitor_process,
+                 (str(metrics_path), metric_queue, expected)),
+        RoleSpec("parameter-server", _autodrive_ps_process,
+                 (config, host, port)),
+    ]
+    specs.extend(
+        RoleSpec(
+            f"worker-{index}", _autodrive_worker_process,
+            (config, host, port, index, metric_queue, str(checkpoint_path)),
+        )
+        for index in range(config.world_size)
+    )
+    result = launcher.run(specs, timeout=timeout)
+    metric_queue.close()
+    records = [
+        json.loads(line) for line in metrics_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    validation = _evaluate_benchmark_checkpoint(config, checkpoint_path)
+    final_step = steps_per_epoch * config.epochs
+    communication_fields = (
+        "gradient_serialize_time", "gradient_upload_time",
+        "parameter_wait_time", "parameter_download_time",
+    )
+    total_step_time = sum(record["total_step_time"] for record in records)
+    communication_time = sum(
+        sum(record[field] for field in communication_fields)
+        for record in records
+    )
+    return {
+        "mode": f"ps_{config.world_size}_workers",
+        "workers": config.world_size, "elapsed": result.elapsed,
+        "samples_per_second": len(dataset) * config.epochs / result.elapsed,
+        "steps": final_step,
+        "first_loss": _weighted_step_loss(records, 1),
+        "last_loss": _weighted_step_loss(records, final_step),
+        "validation": validation,
+        "communication_ratio": communication_time / total_step_time,
+        "checkpoint": str(Path(checkpoint_path)),
+        "metrics": str(metrics_path), "exitcodes": result.exitcodes,
     }
 
 

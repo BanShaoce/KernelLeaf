@@ -159,11 +159,21 @@ strong scaling for 1, 2, or 4 Workers:
 
 ```bash
 python -m apps.distributed_mnist --workers 2 --epochs 5 --device cpu
-python -m benchmarks.bench_distributed --workers 1 2 4 --device cpu
+python -m benchmarks.bench_distributed --model mlp --workers 1 2 4 --device cpu
+python -m benchmarks.bench_distributed --model lenet5 --workers 1 2 4 --device cpu
 ```
 
 See `docs/distributed_training.md` for role ownership, metric definitions,
 synthetic smoke testing, failure cleanup, and the CUDA verification boundary.
+
+The first V16 AutoDrive integration slice reuses the same synchronous PS
+runtime for deterministic single-map `single/1/2/4 Worker` experiments. It
+produces timestamped model checkpoints plus CSV/JSON summaries without yet
+implementing the later Ring, NCCL, or Dashboard integration stages:
+
+```bash
+python -m benchmarks.bench_autodrive_distributed --device cuda
+```
 
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.
