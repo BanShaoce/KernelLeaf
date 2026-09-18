@@ -54,14 +54,34 @@ Monitor 每个 Worker、每个 step 写一条记录：`data_time`、`forward_tim
 
 ## Benchmark
 
-以下命令依次实测 1、2、4 Worker，并打印汇总表：
+以下命令先运行一个无 PS、Socket、子进程和 Monitor 的纯单进程基线，
+再依次实测 1、2、4 Worker，并打印汇总表：
 
 ```powershell
 python -m benchmarks.bench_distributed `
-  --workers 1 2 4 --samples 512 --global-batch-size 128 --device cpu
+  --model mlp --workers 1 2 4 --samples 512 `
+  --global-batch-size 128 --device cpu
 ```
 
-结果 JSONL 写入 `runs/distributed_benchmark/`（已被 Git 忽略）。进程启动和 JSON 数组传输开销可能让多 Worker 比单 Worker 更慢；脚本只展示实测值，不计算或伪造 speedup。
+所有模式使用相同的 MLP、初始化 seed、合成数据、SGD、epoch 数和全局
+batch。`speedup` 是实测吞吐相对于纯单进程基线的比值。分布式结果 JSONL
+写入 `runs/distributed_benchmark/`（已被 Git 忽略）。进程启动和 JSON 数组
+传输开销可能让多 Worker 比纯单进程更慢；脚本如实输出这种结果。
+
+如果只想测量分布式 1/2/4 Worker 之间的 strong scaling，可以增加
+`--skip-single-process`。
+
+要增加计算量并复用 `apps.lenet5_mnist.Net` 的两层卷积模型，可运行：
+
+```powershell
+python -m benchmarks.bench_distributed `
+  --model lenet5 --workers 1 2 4 --samples 1024 `
+  --global-batch-size 256 --epochs 1 --device cpu
+```
+
+LeNet-5 模式约有 120 万参数，Socket+JSON 每一步的通信量也显著高于小型
+MLP。它能提高卷积计算量，但不保证抵消文本序列化和完整参数广播成本；
+应以汇总表和 JSONL 阶段计时为准。
 
 ## 验证
 

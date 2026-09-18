@@ -16,10 +16,10 @@ import kernelleaf as kl
 import kernelleaf.nn as nn
 from kernelleaf.data.datasets import MNISTDataset
 from kernelleaf.distributed import (
-    FramedTransport, JsonCodec, JsonlMonitor, Launcher, MessageType,
-    ParameterServer, RoleSpec, Worker,
+    FramedTransport, JsonCodec, Launcher, ParameterServer, RoleSpec, Worker,
+    connect_with_retry, monitor_process, push_gradients_and_wait,
+    reserve_local_port,
 )
-from kernelleaf.distributed.transport import receive_frame, send_frame
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class TrainingConfig:
     data_root: str = "data/MNIST/raw"
     synthetic_samples: int = 0
     hidden_sizes: tuple = (512, 256, 128)
+    model_name: str = "mlp"
     socket_timeout: float = 30.0
     poll_interval: float = 0.01
 
@@ -50,8 +51,12 @@ class TrainingConfig:
             raise ValueError("device must be cpu or cuda")
         if self.synthetic_samples < 0:
             raise ValueError("synthetic_samples must be non-negative")
+        if self.socket_timeout <= 0 or self.poll_interval <= 0:
+            raise ValueError("socket_timeout and poll_interval must be positive")
         if not self.hidden_sizes or any(size <= 0 for size in self.hidden_sizes):
             raise ValueError("hidden_sizes must contain positive dimensions")
+        if self.model_name not in ("mlp", "lenet5"):
+            raise ValueError("model_name must be mlp or lenet5")
 
 
 class DistributedMNISTMLP(nn.Module):
@@ -74,6 +79,12 @@ def _device(config):
 
 
 def _make_model(config):
+    if config.model_name == "lenet5":
+        # Reuse the canonical application model instead of maintaining a
+        # benchmark-only copy. Import stays lazy for MLP-only users.
+        from apps.lenet5_mnist import Net
+        np.random.seed(config.seed)
+        return Net().to(_device(config))
     np.random.seed(config.seed)
     return DistributedMNISTMLP(config.hidden_sizes, _device(config))
 
@@ -120,16 +131,7 @@ def _global_batches(sample_count, config, epoch):
     return batches
 
 
-def _connect(host, port, timeout, stop_event):
-    deadline = time.monotonic() + timeout
-    while not stop_event.is_set():
-        try:
-            return socket.create_connection((host, port), timeout=min(timeout, 1.0))
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"could not connect to Parameter Server at {host}:{port}")
-            time.sleep(0.02)
-    raise RuntimeError("distributed job was stopped before connection")
+_connect = connect_with_retry
 
 
 def _server_process(stop_event, config, host, port):
@@ -173,53 +175,7 @@ def _server_process(stop_event, config, host, port):
         listener.close()
 
 
-def _receive_decoded(sock, codec, max_size):
-    started = time.perf_counter()
-    payload = receive_frame(sock, max_size)
-    receive_time = time.perf_counter() - started
-    decode_started = time.perf_counter()
-    response = codec.decode(payload)
-    decode_time = time.perf_counter() - decode_started
-    return response, len(payload) + 4, receive_time, decode_time
-
-
-def _push_and_wait(worker, transport, local_count, poll_interval):
-    codec = transport.codec
-    request_started = time.perf_counter()
-    request = worker.gradients_message(local_count)
-    payload = codec.encode(request)
-    serialize_time = time.perf_counter() - request_started
-    upload_started = time.perf_counter()
-    upload_bytes = send_frame(transport.socket, payload, transport.max_frame_size)
-    upload_time = time.perf_counter() - upload_started
-    wait_time = 0.0
-    download_time = 0.0
-    download_bytes = 0
-    while True:
-        response, wire_bytes, receive_time, decode_time = _receive_decoded(
-            transport.socket, codec, transport.max_frame_size
-        )
-        wait_time += receive_time
-        if response.message_type is MessageType.PARAMETERS:
-            accept_started = time.perf_counter()
-            worker.handle_response(request, response)
-            download_time = decode_time + (time.perf_counter() - accept_started)
-            download_bytes = wire_bytes
-            return {
-                "gradient_serialize_time": serialize_time,
-                "gradient_upload_time": upload_time,
-                "parameter_wait_time": wait_time,
-                "parameter_download_time": download_time,
-                "optimizer_time": float(response.payload.get("optimizer_time", 0.0)),
-                "upload_bytes": upload_bytes,
-                "download_bytes": download_bytes,
-            }
-        worker.handle_response(request, response)
-        time.sleep(poll_interval)
-        pull = worker.pull_message(worker.step + 1)
-        pull_payload = codec.encode(pull)
-        send_frame(transport.socket, pull_payload, transport.max_frame_size)
-        request = pull
+_push_and_wait = push_gradients_and_wait
 
 
 def _worker_process(stop_event, config, host, port, worker_index, metric_queue):
@@ -288,17 +244,8 @@ def _worker_process(stop_event, config, host, port, worker_index, metric_queue):
         transport.close()
 
 
-def _monitor_process(stop_event, output_path, metric_queue, expected_records):
-    del stop_event
-    JsonlMonitor(output_path).run(metric_queue, expected_records)
-
-
-def _reserve_port(host):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((host, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+_monitor_process = monitor_process
+_reserve_port = reserve_local_port
 
 
 def run_distributed_training(config, output_path, *, timeout=120.0):
@@ -361,6 +308,7 @@ def build_parser():
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--model", choices=("mlp", "lenet5"), default="mlp")
     parser.add_argument("--data-root", default="data/MNIST/raw")
     parser.add_argument("--synthetic-samples", type=int, default=0)
     parser.add_argument("--metrics", default="runs/distributed_mnist/metrics.jsonl")
@@ -375,7 +323,7 @@ def main(argv=None):
         global_batch_size=args.global_batch_size,
         learning_rate=args.lr, weight_decay=args.weight_decay,
         seed=args.seed, device=args.device, data_root=args.data_root,
-        synthetic_samples=args.synthetic_samples,
+        synthetic_samples=args.synthetic_samples, model_name=args.model,
     )
     summary = run_distributed_training(config, args.metrics, timeout=args.timeout)
     print(json.dumps(summary, indent=2, sort_keys=True))

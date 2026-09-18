@@ -1,12 +1,15 @@
 import json
+import threading
 import time
 
 import numpy as np
 import pytest
 
+import kernelleaf as kl
 from apps.distributed_mnist import (
-    TrainingConfig, _global_batches, run_distributed_training,
+    TrainingConfig, _connect, _global_batches, run_distributed_training,
 )
+from benchmarks.bench_distributed import run_single_process_baseline
 from kernelleaf.distributed import (
     DistributedProcessError, METRIC_FIELDS, JsonlMonitor, Launcher,
     MetricValidationError, RoleSpec,
@@ -40,6 +43,30 @@ def _metric(**updates):
 
 def test_launcher_always_uses_spawn_context():
     assert Launcher().context.get_start_method() == "spawn"
+
+
+def test_worker_connection_uses_request_timeout_after_short_connect_retry(
+        monkeypatch):
+    class FakeSocket:
+        timeout = None
+
+        def settimeout(self, value):
+            self.timeout = value
+
+    connection = FakeSocket()
+    observed = {}
+
+    def connect(address, timeout):
+        observed.update(address=address, timeout=timeout)
+        return connection
+
+    monkeypatch.setattr(
+        "apps.distributed_mnist.socket.create_connection", connect
+    )
+    result = _connect("127.0.0.1", 4321, 30.0, threading.Event())
+    assert result is connection
+    assert observed == {"address": ("127.0.0.1", 4321), "timeout": 1.0}
+    assert connection.timeout == 30.0
 
 
 def test_launcher_terminates_other_roles_when_one_fails():
@@ -93,8 +120,15 @@ def test_two_worker_spawn_smoke_lowers_loss_and_exits(tmp_path):
         socket_timeout=10.0,
     )
     summary = run_distributed_training(config, output, timeout=60.0)
+    baseline = run_single_process_baseline(config)
     assert summary["records"] == 12
     assert summary["last_loss"] < summary["first_loss"]
+    assert baseline["last_loss"] < baseline["first_loss"]
+    np.testing.assert_allclose(
+        [summary["first_loss"], summary["last_loss"]],
+        [baseline["first_loss"], baseline["last_loss"]],
+        rtol=1e-5, atol=1e-6,
+    )
     assert set(summary["exitcodes"].values()) == {0}
     records = [json.loads(line) for line in output.read_text().splitlines()]
     assert {record["worker_id"] for record in records} == {
@@ -111,3 +145,18 @@ def test_invalid_final_batch_is_rejected_before_process_launch(tmp_path):
     )
     with pytest.raises(ValueError, match="final global batch"):
         run_distributed_training(config, tmp_path / "metrics.jsonl")
+
+
+def test_lenet5_benchmark_reuses_application_model():
+    from apps.distributed_mnist import _make_model
+    from apps.lenet5_mnist import Net
+
+    config = TrainingConfig(
+        world_size=1, synthetic_samples=4, global_batch_size=4,
+        model_name="lenet5",
+    )
+    model = _make_model(config)
+    assert isinstance(model, Net)
+    output = model(kl.Tensor(np.zeros((2, 784), dtype=np.float32)))
+    assert output.shape == (2, 10)
+    assert sum(parameter.numpy().size for parameter in model.parameters()) == 1_199_882

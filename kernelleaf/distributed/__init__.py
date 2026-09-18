@@ -34,6 +34,10 @@ from .launcher import (
 from .monitor import (
     METRIC_FIELDS, JsonlMonitor, MetricValidationError, validate_metric,
 )
+from .runtime import (
+    connect_with_retry, monitor_process, push_gradients_and_wait,
+    reserve_local_port,
+)
 
 __all__ = [
     "PROTOCOL_VERSION", "Message", "MessageType", "ProtocolError",
@@ -47,4 +51,6 @@ __all__ = [
     "DistributedProcessError", "LaunchResult", "Launcher", "RoleSpec",
     "METRIC_FIELDS", "JsonlMonitor", "MetricValidationError",
     "validate_metric",
+    "connect_with_retry", "monitor_process", "push_gradients_and_wait",
+    "reserve_local_port",
 ]
