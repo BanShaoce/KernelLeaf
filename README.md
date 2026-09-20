@@ -107,7 +107,9 @@ See `apps/autodrive/README.md` for legacy DonkeyCar manifest
 conversion, training, resume, and evaluation commands. The Paddle directory is
 reference code only. The AutoDrive package now also loads paired JSON/NPZ
 artifacts for safe, smoothed, dual-head closed-loop driving through an isolated
-Gym DonkeyCar adapter. V8 adds keyboard steering/dynamic-throttle collection,
+Gym DonkeyCar adapter.
+
+ V8 adds keyboard steering/dynamic-throttle collection,
 timestamped per-run records, image/label auditing, per-map grouped splitting,
 and steering/throttle Grad-CAM using KernelLeaf autograd. Run
 `python -m apps.autodrive --help` for the unified entry point and see the app
@@ -139,6 +141,53 @@ python -m apps.autodrive dashboard --runs-root runs
 
 See `apps/autodrive/dashboard/README.md` for Vue development/build commands and
 the real training workflow.
+
+V12.1 establishes the transport-only foundation for later distributed work:
+strict versioned messages, a replaceable codec interface, JSON ndarray
+serialization, and length-prefixed TCP framing with explicit timeout,
+disconnect, and invalid-frame errors. It intentionally contains no Parameter
+Server or distributed training loop. See `docs/distributed_protocol.md`.
+
+V12.2 adds the synchronous Parameter Server state machine and Worker protocol.
+The server alone owns the optimizer, validates stable parameter names and
+gradient schemas, weights local mean gradients by sample count, and performs
+one update per complete Worker set. See `docs/parameter_server.md`.
+
+V12.3 adds a Windows-safe spawn launcher, append-only JSONL monitor, and a
+single-machine synchronous MNIST MLP application with fixed-global-batch
+strong scaling for 1, 2, or 4 Workers:
+
+```bash
+python -m apps.distributed_mnist --workers 2 --epochs 5 --device cpu
+python -m benchmarks.bench_distributed --model mlp --workers 1 2 4 --device cpu
+python -m benchmarks.bench_distributed --model lenet5 --workers 1 2 4 --device cpu
+```
+
+See `docs/distributed_training.md` for role ownership, metric definitions,
+synthetic smoke testing, failure cleanup, and the CUDA verification boundary.
+
+PR #2's sparse logistic-regression and collapsed-Gibbs LDA experiments are
+available as an isolated experiment package. Their sparse key/value runtime is
+kept separate from the canonical V12–V16 dense Tensor training stack:
+
+```bash
+python -m experiments.distributed.run_experiments --experiment lr --transport socket --mode sync --workers 4 --shards 2
+python -m experiments.distributed.run_experiments --experiment lda --transport socket --mode async --workers 4 --shards 2
+python -m experiments.distributed.benchmark_table --skip-grpc
+```
+
+See `experiments/distributed/README.md` and
+`docs/sparse_parameter_server.md` for provenance, optional gRPC setup,
+architecture, and benchmark definitions.
+
+The first V16 AutoDrive integration slice reuses the same synchronous PS
+runtime for deterministic single-map `single/1/2/4 Worker` experiments. It
+produces timestamped model checkpoints plus CSV/JSON summaries without yet
+implementing the later Ring, NCCL, or Dashboard integration stages:
+
+```bash
+python -m benchmarks.bench_autodrive_distributed --device cuda
+```
 
 Expected files are under `data/MNIST/raw/`. Unit tests use synthetic inputs and
 do not require the dataset.

@@ -420,6 +420,44 @@ python -m apps.autodrive gradcam `
 
 ## 11. 运行测试
 
+### AutoDrive 单机同步 PS benchmark（V16 第一阶段）
+
+默认对 `mountain-track` 训练 10 epochs，依次实测纯单进程和同步 PS 的
+1/2/4 Worker。每种模式的最终 NPZ 模型和带相同时间戳的 CSV/JSON 汇总写入
+`bin/`，逐 step 通信指标写入 `runs/autodrive_benchmark/`：
+
+```powershell
+python -m benchmarks.bench_autodrive_distributed `
+  --device cuda
+```
+
+等价的完整默认参数为：
+
+```powershell
+python -m benchmarks.bench_autodrive_distributed `
+  --manifest data/DonkeyCar/manifest.jsonl `
+  --map mountain-track `
+  --workers 1 2 4 `
+  --epochs 10 `
+  --global-batch-size 32 `
+  --device cuda `
+  --output-dir bin
+```
+
+输出模型示例：
+
+```text
+bin/autodrive_mountain-track_single_20260916-173000.npz
+bin/autodrive_mountain-track_ps-1w_20260916-173000.npz
+bin/autodrive_mountain-track_ps-2w_20260916-173000.npz
+bin/autodrive_mountain-track_ps-4w_20260916-173000.npz
+```
+
+同步 PS 使用确定性的全局乱序和互不重叠的 Worker 分片，尾批按实际样本数
+加权。最终分布式 checkpoint 使用 rank 0 的 BatchNorm running statistics，
+这是非 SyncBatchNorm DDP 的常见策略；本阶段尚未实现 V16 的 Ring/NCCL 或
+Dashboard 最终集成。
+
 运行全部测试：
 
 ```powershell

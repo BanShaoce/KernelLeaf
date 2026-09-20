@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package kernelleaf.distributed;
+
+// Canonical schema for the optional gRPC transport. The Python runtime builds
+// equivalent descriptors lazily so protoc is not required to run experiments.
+service ParameterServer {
+  rpc Request (ParameterRequest) returns (ParameterResponse);
+}
+message ParameterEntry {
+  string key = 1;
+  repeated double values = 2;
+  string op = 3;
+}
+
+message ParameterRequest {
+  string action = 1;
+  string worker_id = 2;
+  int64 clock = 3;
+  repeated string keys = 4;
+  repeated ParameterEntry entries = 5;
+  string mode = 6;
+}
+
+message ParameterResponse {
+  bool ok = 1;
+  string error = 2;
+  int64 version = 3;
+  repeated ParameterEntry values = 4;
+  string metadata_json = 5;
+}

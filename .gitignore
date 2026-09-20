@@ -19,10 +19,10 @@ checkpoints/
 logs/
 runs/
 benchmarks/results/
+bin/
 data/*
 !data/MNIST/
 data/MNIST/*
 !data/MNIST/raw/
 data/MNIST/raw/*
 /apps/auto-drive(paddle)
-/KernelLeaf_refactor.md

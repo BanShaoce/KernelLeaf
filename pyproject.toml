@@ -27,10 +27,12 @@ dashboard = ["fastapi>=0.110", "uvicorn>=0.27", "psutil>=5.9"]
 autodrive = ["Pillow>=9"]
 simulator = ["gym>=0.26", "gym-donkeycar"]
 collection = ["pygame>=2", "Pillow>=9"]
+grpc = ["grpcio>=1.60", "protobuf>=4.25"]
+benchmark = ["psutil>=5.9"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kernelleaf*"]
+include = ["kernelleaf*", "experiments*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
